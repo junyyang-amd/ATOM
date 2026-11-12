@@ -656,12 +656,15 @@ def pd_engine(monkeypatch, server):
     }
 
     def preprocess(tokens, sampling, stream_callback=None, **kwargs):
+        multimodal_data = kwargs.get("multimodal_data")
         seq = Sequence(
             list(tokens),
             16,
             sampling,
             kv_transfer_params=kwargs.get("kv_transfer_params"),
-            multimodal_data=kwargs.get("multimodal_data"),
+            multimodal_data=multimodal_data,
+            # As an MRoPE model's `get_mrope_input_positions` returns it.
+            mrope_position_delta=-2 if multimodal_data is not None else 0,
         )
         engine.seqs.append(seq)
         produces = (seq.kv_transfer_params or {}).get("do_remote_decode")
@@ -724,6 +727,7 @@ class TestMultimodalPD:
         assert prefill.status_code == 200, prefill.text
         kv = prefill.json()["kv_transfer_params"]
         assert kv["cache_seed"] == pd_engine.media_seed
+        assert kv["mrope_position_delta"] == -2
 
         # As ATOMesh's relay builds D's body: P's metadata plus its ids.
         kv["prompt_token_ids"] = prefill.json()["prompt_token_ids"]
@@ -742,6 +746,7 @@ class TestMultimodalPD:
         assert list(d_seq.token_ids) == PROMPT_IDS
         assert d_seq.kv_transfer_params["remote_block_ids"] == [3, 4]
         assert d_seq.cache_seed == p_seq.cache_seed == pd_engine.media_seed
+        assert d_seq.mrope_position_delta == p_seq.mrope_position_delta == -2
 
     def test_decode_without_cache_seed_keeps_the_text_seed(self, pd_engine):
         kv = {"do_remote_prefill": True, "prompt_token_ids": PROMPT_IDS}
@@ -751,6 +756,7 @@ class TestMultimodalPD:
         assert decode.status_code == 200, decode.text
         (seq,) = pd_engine.seqs
         assert pd_engine.prepared == [] and seq.cache_seed == -1
+        assert seq.mrope_position_delta == 0
 
     def test_prefill_without_handoff_returns_no_kv_params(self, pd_engine):
         (response,) = _post_chat([{"model": "m", "messages": IMAGE_MESSAGES}])

@@ -1139,10 +1139,11 @@ async def generate_async_multimodal(
         "latency": finished_at - started_at,
     }
     if kv_transfer_output_meta_info is not None:
-        # Decode has no media to hash: it seeds its prefix cache with this.
+        # Decode has no media: it seeds its prefix cache and positions with these.
         response["kv_transfer_output_meta_info"] = {
             **kv_transfer_output_meta_info,
             "cache_seed": seq.cache_seed,
+            "mrope_position_delta": seq.mrope_position_delta,
         }
     if return_token_ids and seq is not None:
         response["prompt_token_ids"] = list(seq.prompt_token_ids)
