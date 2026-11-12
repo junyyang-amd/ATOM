@@ -94,11 +94,13 @@ docker exec -d "$NAME" bash -c "exec /opt/spike-mesh/$(basename "$ATOMESH") laun
   --log-level info > $OUT/mesh.log 2>&1"
 until curl -sf "http://127.0.0.1:$PORT_M/health" >/dev/null; do sleep 2; done
 
-# RDMA bytes received over every HCA on the node: which transport carried the KV.
+# Bytes received over every HCA (RDMA) and over loopback, which carries TCP
+# between two processes on this node: which transport carried the KV.
 rdma_rx() { cat /sys/class/infiniband/*/ports/1/hw_counters/rx_rdma_ucast_bytes | paste -sd+ | bc; }
+lo_rx() { awk -F'[: ]+' '$2 == "lo" { print $3 }' /proc/net/dev; }
 for r in $(seq "$REPS"); do
   offset=$(stat -c %s "$OUT/mesh.log")
-  rx0=$(rdma_rx)
+  rx0=$(rdma_rx) lo0=$(lo_rx)
   docker exec "$NAME" lm_eval --model local-chat-completions \
     --model_args "model=minimax-m3.1,base_url=http://127.0.0.1:$PORT_M/v1/chat/completions,tokenizer=$MODEL,tokenized_requests=False,num_concurrent=16,max_gen_toks=16384" \
     --tasks gsm8k --num_fewshot 5 --apply_chat_template --fewshot_as_multiturn --limit "$LIMIT" \
@@ -107,5 +109,5 @@ for r in $(seq "$REPS"); do
   sleep 3 # the HCA counters refresh with a delay
   docker exec "$NAME" python3 "$SPIKE/score.py" --label "$TOPO dspark=$DSPARK mc_disable_hip=$MC_DISABLE_HIP run $r" \
     --results "$OUT/gsm8k-run$r" --mesh-log "$OUT/mesh.log" --offset "$offset" \
-    --rdma-rx-bytes $(($(rdma_rx) - rx0)) | tee -a "$OUT/score.jsonl"
+    --rdma-rx-bytes $(($(rdma_rx) - rx0)) --lo-rx-bytes $(($(lo_rx) - lo0)) | tee -a "$OUT/score.jsonl"
 done
