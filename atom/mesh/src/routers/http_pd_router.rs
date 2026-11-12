@@ -466,11 +466,17 @@ impl PDRouter {
     pub(crate) async fn execute_placement(
         &self,
         headers: &HeaderMap,
-        body: Value,
+        mut body: Value,
         metadata: &InferenceMetadata,
         path: &str,
         placement: Arc<ReservedPair>,
     ) -> Response {
+        // Only E's output may reach P, and this path never runs E.
+        if matches!(self.backend, BackendType::Atom) {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("ec_transfer_params");
+            }
+        }
         let mut context = PDRequestContext::from_metadata(metadata, Some(headers));
         context.route = path;
         self.execute_reserved(Some(headers), body, context, placement)
@@ -2579,6 +2585,82 @@ mod tests {
             .collect();
         assert_eq!(request_counts.len(), 1, "{rendered}");
         assert!(request_counts[0].ends_with(" 1"), "{rendered}");
+        server.abort();
+    }
+
+    #[cfg(feature = "ext-proc")]
+    #[tokio::test]
+    async fn reserved_execution_drops_a_client_ec_transfer_params_before_prefill() {
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback({
+            let bodies = bodies.clone();
+            move |uri: axum::http::Uri, axum::Json(body): axum::Json<Value>| {
+                let bodies = bodies.clone();
+                async move {
+                    bodies.lock().unwrap().push((uri.path().to_string(), body));
+                    axum::Json(json!({"choices": []}))
+                }
+            }
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut router = create_test_pd_router();
+        router.backend = BackendType::Atom;
+        router.adapter = Arc::new(AtomAdapter::new(Arc::default()));
+        let prefill: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new(format!("{url}/prefill"))
+                .worker_type(WorkerType::Prefill {
+                    bootstrap_port: None,
+                })
+                .build(),
+        );
+        let decode: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new(format!("{url}/decode"))
+                .worker_type(WorkerType::Decode)
+                .build(),
+        );
+        let pair = router
+            .reserve_pair(
+                PlacementPlan::Pair {
+                    prefill,
+                    decode,
+                    prefill_policy: "round_robin",
+                    decode_policy: "round_robin",
+                },
+                None,
+            )
+            .unwrap();
+        let metadata = InferenceMetadata {
+            route: "/v1/chat/completions",
+            model: None,
+            text: String::new(),
+            batch_size: None,
+            stream: false,
+            return_logprob: false,
+        };
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "ec_transfer_params": {"remote_addr": "client-chosen"},
+        });
+        let response = router
+            .execute_placement(&HeaderMap::new(), body, &metadata, metadata.route, pair)
+            .await;
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bodies = bodies.lock().unwrap();
+        let prefill_bodies: Vec<_> = bodies
+            .iter()
+            .filter(|(path, _)| path.starts_with("/prefill/"))
+            .collect();
+        assert_eq!(prefill_bodies.len(), 1, "{bodies:?}");
+        assert!(
+            prefill_bodies[0].1.get("ec_transfer_params").is_none(),
+            "{bodies:?}"
+        );
         server.abort();
     }
 
