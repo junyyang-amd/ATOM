@@ -309,7 +309,8 @@ class Sequence:
         self.multimodal_data = multimodal_data
         self.multimodal_cache_ready = False
         # Immutable content identity survives payload release and preemption.
-        self.cache_seed = -1
+        # A decode leg has no media: it keeps the identity its prefill sent.
+        self.cache_seed = (kv_transfer_params or {}).get("cache_seed", -1)
         if multimodal_data is not None:
             from atom.model_engine.multimodal_runtime import multimodal_cache_seed
 
