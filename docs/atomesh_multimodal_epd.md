@@ -210,17 +210,22 @@ the requirement does not ask for.
 
 ### Multimodal PD
 
-**D4. The shared multimodal generator carries `kv_transfer_params`.**
-`generate_async_multimodal` takes `kv_transfer_params`, passes it on as
-`generate_async` does, and returns `kv_transfer_output_meta_info` with the
-sequence's `cache_seed` added; the chat multimodal branches (streaming,
-non-streaming, n>1) pass it, and `_prepare_engine_input` drops its refusal.
-Basis: code `atom/entrypoints/openai/api_server.py:
+**D4. The shared multimodal generator carries `kv_transfer_params` on
+the chat path.** `generate_async_multimodal` takes `kv_transfer_params`,
+passes it on as `generate_async` does, and returns
+`kv_transfer_output_meta_info` with the sequence's `cache_seed` added; the
+chat multimodal branches (streaming, non-streaming, n>1) pass it.
+`_prepare_engine_input` keeps its refusal of images with
+`kv_transfer_params`: it serves only `/v1/messages` and `/v1/responses`,
+whose images are a #2 non-goal, and their shared `_generate_nonstream`
+does not hand `kv_transfer_params` to the multimodal generator, so without
+the refusal a PD request there would stall D waiting for KV that P never
+sends. Basis: code `atom/entrypoints/openai/api_server.py:
 generate_async_multimodal` has no such parameter, `_prepare_engine_input`
-raises "image input cannot be combined with kv_transfer_params";
-principle: fix shared code, not callers. Rejected: fold the multimodal
-generator into `generate_async`, a larger change to the text path project
-principle 2 keeps still.
+raises "image input cannot be combined with kv_transfer_params" and is
+called only by the messages and responses handlers; principle: fix shared code, not callers. Rejected:
+fold the multimodal generator into `generate_async`, a larger change to the
+text path project principle 2 keeps still.
 
 **D5. Decode takes the pretokenized branch.** In `_chat_completions`, a
 request whose `kv_transfer_params` carries `do_remote_prefill` and
@@ -249,9 +254,10 @@ the expanded ids and preprocess. Rejected: let D preprocess in chunked
 mode, which #2's Scope forbids.
 
 **D8. 1P1D for M3.1 runs on one g15 node.** P on GPUs 0-3 and D on 4-7 at
-the recipe's TP4, Mooncake with `MC_DISABLE_HIP=1`, DSpark on as in the
-recipe. Basis: spike #5 (Dependencies) measured text 1P1D correct this way
-and garbled without `MC_DISABLE_HIP`; code `.github/benchmark/
+the recipe's TP4, Mooncake with `MC_DISABLE_HIP=1` and the HCAs named
+as in D11, DSpark on as in the recipe. Basis: spike #5 (Dependencies)
+measured text 1P1D correct this way, over TCP, and garbled without
+`MC_DISABLE_HIP`; code `.github/benchmark/
 models_atomesh.yaml` cell `minimax-m3-fp4-1p1d-tp4` sets it; project
 principle 5. Rejected: two nodes, which need an owner-named node for a
 topology shown correct on one.
@@ -293,14 +299,22 @@ hot path, to buy batching P does not use. Low confidence: see below.
 **D11. Embeddings move over Mooncake; P pulls.** E registers its pool with
 a Mooncake TransferEngine; each P rank reads with `transfer_sync_read`
 inside the encode callback. Device selection reuses the KV connector's
-(`mooncake_connector.py: _auto_select_ib_device`), with `MC_DISABLE_HIP=1`
-as for KV. Basis: spike #7 measured Mooncake RDMA at 0.56 ms for 16 MiB
-against 15.5 ms for an HTTP pull and 118 ms inline through ATOMesh; spike
-#6 measured a median 11 MB per A5 request; code `embed_multimodal_batch`
-runs the callback inside the forward step, so a fetch blocks every request
-in the batch on every rank; principle: reuse existing dependencies.
-Rejected: HTTP pull from E's host memory, about 200 lines less (#9's
-estimates), but about 11 ms per new image request inside P's forward step.
+`mooncake_connector.py: _select_ib_devices`, with `MC_DISABLE_HIP=1` as for
+KV, and the harness names the HCAs: it sets `ATOM_MOONCAKE_IB_DEVICE` on E,
+P and D to the `rocep*` HCAs local to each role's GPUs, as spike #7 passed
+them (`bench.py --ib`). `_select_ib_devices` takes a configured device
+before `_auto_select_ib_device`, which on g15 picks a missing `rdma<N>`
+and leaves Mooncake on TCP (#12). Naming them also moves A4's and A5's KV
+onto RDMA alike, so A5's PD baseline runs on the same transport, and A4's
+`mmstar` check covers KV over RDMA, which spike #5 did not run. Basis:
+spike #7 measured Mooncake RDMA at 0.56 ms for 16 MiB against 15.5 ms for
+an HTTP pull and 118 ms inline through ATOMesh, on one node; spike #6
+measured a median 11 MB per A5 request; code `embed_multimodal_batch` runs
+the callback inside the forward step, so a fetch blocks every request in
+the batch on every rank; principle: reuse existing dependencies. Rejected:
+HTTP pull from E's host memory, about 200 lines less (#9's estimates), but
+about 11 ms per new image request inside P's forward step. Low confidence:
+see below.
 
 **D12. E keeps an entry for a lease, guarded by a generation word.** E's
 pool reuses space oldest-first, and only once an entry is older than
@@ -320,17 +334,29 @@ channel from `ModelRunner` subprocesses to E and E knowing P's TP size.
 length, generation, rows). ATOMesh copies it into P's body; P's chat path
 puts it into the request's `multimodal_data`, which the scheduler already
 carries to the runner for prefill. A body without it behaves as today.
-Basis: code `api_server.py: _with_kv_transfer_params`, `atom.rs:
-AtomAdapter::enrich_decode_kv`, `multimodal_runtime.py:
-prefill_media_payload` (keeps every key but `token_types` and, once
-leased, the pixels); principle: follow existing conventions. Rejected: a
-new `/v1/encode` endpoint with its own schema, a public interface the
-requirement does not ask for.
+This conflicts with the principle "Change public interfaces only when the
+requirement does": the chat request and response gain an optional
+`ec_transfer_params`, and E's response has no choices. The requirement
+settles it: #2's Goal 3 has E hand embeddings to P with ATOMesh
+orchestrating E to P to D, so the handoff must cross the HTTP interface
+between them. It follows the precedent of `kv_transfer_params`, the
+optional field the chat request and response already carry for the P to D
+handoff. A client of a single or PD deployment sees neither field nor a
+choice-less response: only an `--encoder-only` server answers that way,
+and only ATOMesh calls it. Basis: code `atom/entrypoints/openai/
+protocol.py: ChatCompletionResponse` (`kv_transfer_params`), `api_server.py:
+_with_kv_transfer_params`, `atom.rs: AtomAdapter::enrich_decode_kv`,
+`multimodal_runtime.py: prefill_media_payload` (keeps every key but
+`token_types` and, once leased, the pixels); principle: follow existing
+conventions. Rejected: a new `/v1/encode` endpoint with its own schema,
+which changes the public interface more than an optional field on the
+existing one.
 
 **D14. E/P/D can meet A5 on the measured margin.** At A5's workload the
 tower is 44-51% of P's prefill forward time and a median 32-36% of TTFT
 (spike #6); E removes it from P's forward step for under 1 ms of transfer
-(spike #7) plus E's hop. The request's own encode moves to E rather than
+on one node (spike #7; the cross-node read is under Low confidence) plus
+E's hop. The request's own encode moves to E rather than
 vanishing; the gain is P's shorter step, which every queued request waits
 on. Basis: spikes #6 and #7. Rejected: hold the E role until a prototype
 measures A5, when the margin is an order of magnitude above the added
@@ -421,6 +447,16 @@ from which E's own hop and encode already come.
   The rejected `ModelRunner` mode costs a branch on the text hot path in
   several places; the chosen design keeps its fallback (the encode loop in
   one spawned process behind the same queue) inside the encoder module.
+- **D11, the cross-node read.** Spike #7 measured Mooncake on one node
+  only; E sits on a second node (D17), so the read P makes in its forward
+  step is unmeasured across nodes, and with it the margin over the HTTP
+  pull. #7's cross-node cell settles it, run once the owner names E's
+  node; no data can be had before then. The A5 margin from D14 holds
+  either way: the saving A5 needs is an upper bound of 32-36% of a median
+  TTFT of 921-1333 ms, about 300 to 480 ms, and even the HTTP pull's
+  single-node 15.5 ms at 16 MiB is a small fraction of it. What the cell
+  can change is D11's choice over the HTTP pull, not whether A5 is
+  reachable.
 - **D17, E's node.** It rests on the owner naming a second node; no data
   settles it. K3.1 (D18) needs owner-named nodes too.
 - **D19, the CI case.** It reads two files #2 names together
@@ -438,10 +474,10 @@ from which E's own hop and encode already come.
 
 No interface here exists only upstream, so no sync issue is needed.
 
-Open backlog issues that bear on the runs: #12 (Mooncake picks no RDMA
-device on g15, so KV, and with D11 the embeddings, travel over TCP there;
-A4 checks accuracy only, while A5's margin absorbs a TCP read but loses
-some of it) and #11 (a flaky upstream tree test the local gate skips).
+Open backlog issues near the runs: #12 (Mooncake auto-selects a missing
+HCA on g15 and falls back to TCP) does not bear on them, because the
+harness names the HCAs (D11), so it stays in the backlog; #11 is a flaky
+upstream tree test the local gate skips.
 
 ## Summary
 
@@ -450,8 +486,8 @@ K3.1 in single, 1P1D and E/P/D topologies, the acceptance harness and one
 CI case, as #2 states.
 
 **Non-goals**: as #2. Also no images over gRPC, no PD for images on
-`/v1/messages` and `/v1/responses` beyond dropping the refusal in
-`_prepare_engine_input`, and no embedding cache beyond E's lease.
+`/v1/messages` and `/v1/responses` (the refusal in `_prepare_engine_input`
+stays), and no embedding cache beyond E's lease.
 
 **Changes per file**
 
@@ -480,7 +516,8 @@ CI case, as #2 states.
   `core/steps/worker/local/create_worker.rs`, `routers/ingress.rs`,
   `routers/http_pd_router.rs`: the E role, its dispatch and fallback (D15,
   D16).
-- `tests/accept/atomesh_mm/`: `accept.sh` and its helpers (D20).
+- `tests/accept/atomesh_mm/`: `accept.sh` and its helpers, with g15's
+  GPU-to-HCA map for `ATOM_MOONCAKE_IB_DEVICE` (D11, D20).
 - `.github/benchmark/models_atomesh.yaml`, `.github/scripts/atomesh/
   pd_matrix.py`, `.github/scripts/atomesh/pd_slurm_job.sh`: the CI cell
   and the image eval task (D19).
