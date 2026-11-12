@@ -20,7 +20,9 @@ IP=${IP:-$(hostname -I | awk '{print $2}')}
 NAME=${NAME:-epd-5-$TOPO}
 MC_DISABLE_HIP=${MC_DISABLE_HIP:-1}
 OUT=${OUT:-/share_nfs/junyan_tmp_r120/spike5/$TOPO-dspark$DSPARK-hipoff$MC_DISABLE_HIP-$(date +%m%d-%H%M%S)}
-PORT_P=18510 PORT_D=18520 PORT_M=18500 HANDSHAKE=16301
+# The producer binds HANDSHAKE + tp_rank. Mooncake's TCP transport listens on
+# random ports around 15000-17000, so the handshake stays below them, as in CI.
+PORT_P=18510 PORT_D=18520 PORT_M=18500 HANDSHAKE=6301
 TREE=$(pwd -P)
 SPIKE=$TREE/spike/m31_pd_single_node
 mkdir -p "$OUT"
