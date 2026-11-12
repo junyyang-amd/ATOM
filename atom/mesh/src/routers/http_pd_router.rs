@@ -121,10 +121,7 @@ struct WorkerOutcome {
 
 impl WorkerOutcome {
     fn record_error(&self, worker: &dyn Worker) {
-        let kind = match worker.worker_type() {
-            crate::core::WorkerType::Prefill { .. } => metrics_labels::WORKER_PREFILL,
-            _ => metrics_labels::WORKER_DECODE,
-        };
+        let kind = worker.worker_type().as_metric_label();
         let error = self
             .status
             .filter(|s| s.is_client_error() || s.is_server_error())
@@ -1829,16 +1826,12 @@ impl PDRouter {
         worker: &Arc<dyn Worker>,
         headers: Option<&HeaderMap>,
     ) -> Arc<dyn crate::policies::LoadBalancingPolicy> {
-        let (pool, policy) = match worker.worker_type() {
-            crate::core::WorkerType::Prefill { .. } => (
-                metrics_labels::WORKER_PREFILL,
-                self.policy_registry.get_prefill_policy(),
-            ),
-            _ => (
-                metrics_labels::WORKER_DECODE,
-                self.policy_registry.get_decode_policy(),
-            ),
+        let policy = match worker.worker_type() {
+            crate::core::WorkerType::Prefill { .. } => self.policy_registry.get_prefill_policy(),
+            crate::core::WorkerType::Encode => self.policy_registry.get_encode_policy(),
+            _ => self.policy_registry.get_decode_policy(),
         };
+        let pool = worker.worker_type().as_metric_label();
         // Only a request that is actually sent moves the session.
         policy.on_dispatch(pool, headers, worker);
         policy
