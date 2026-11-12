@@ -15,6 +15,8 @@ docker run -d --name $name --network host --ipc host --device /dev/kfd --device 
   -v /share_nfs:/share_nfs -v "$HOME:$HOME" -w "$root" \
   "${IMG:-rocm/atom-dev:nightly_202611081546}" sleep infinity
 trap 'docker rm -f $name >/dev/null' EXIT
+# The image predates the jsonschema dependency in pyproject.toml.
+docker exec $name pip install -q "jsonschema>=4.25,<5"
 timing=""
 [[ "${TIMING:-1}" == 0 ]] || timing="$out/timing"
 docker exec -d -e PYTHONPATH="$spike:$root" -e SPIKE_TIMING_DIR="$timing" \
