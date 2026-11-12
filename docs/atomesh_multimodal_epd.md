@@ -117,8 +117,9 @@ and their delta.
 
 ### E/P/D when E cannot serve
 
-No healthy encode worker, an E error, a failed read, a changed generation
-word or a `cache_seed` mismatch all end in P encoding locally, as in PD.
+No healthy encode worker, an E error (a full pool included), a failed read,
+a changed generation word or a `cache_seed` mismatch all end in P encoding
+locally, as in PD.
 
 ```mermaid
 sequenceDiagram
@@ -334,6 +335,9 @@ unmeasured until A5's `ttft` check runs. Mooncake keeps that third for the
 **D12. E keeps an entry for a lease, guarded by a generation word.** E's
 pool reuses space oldest-first, and only once an entry is older than
 `ATOM_EC_LEASE_S` (defined in `atom/utils/envs.py`, project principle 3).
+When every entry the new rows would overwrite is still inside its lease,
+the pool is full: E answers that request with an error, and ATOMesh falls
+back to PD for it (D16).
 Each entry starts with a generation word E bumps on reuse. P reads the
 payload, then rereads the word; a changed word, a failed read or a
 `cache_seed` other than its own makes P run its own tower, which it keeps
