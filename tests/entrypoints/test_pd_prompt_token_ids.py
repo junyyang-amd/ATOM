@@ -21,7 +21,7 @@ from atom.entrypoints.openai.protocol import (
     CompletionRequest,
 )
 from atom.model_engine.multimodal_runtime import multimodal_cache_seed
-from atom.model_engine.sequence import Sequence
+from atom.model_engine.sequence import Sequence, SequenceStatus
 from atom.sampling_params import SamplingParams
 
 PROMPT_IDS = [101, 102, 103, 104]
@@ -777,6 +777,28 @@ class TestMultimodalPD:
         assert response.status_code == 200, response.text
         (seq,) = pd_engine.seqs
         assert len(pd_engine.prepared) == 1 and seq.multimodal_data is not None
+
+
+@pytest.mark.parametrize("image", [True, False])
+def test_preempted_decode_fails_only_without_media(scheduler, seq_factory, image):
+    # The connector has cleared `do_remote_prefill` once D's KV load was queued.
+    kv = {"do_remote_prefill": False, **({"cache_seed": 9} if image else {})}
+    seq = seq_factory(list(PROMPT_IDS), kv_transfer_params=kv)
+    scheduler.add(seq)
+    scheduler.schedule()
+    seq.append_token(5)
+    scheduler.running.remove(seq)
+
+    assert scheduler.preempt(seq)
+
+    assert len(seq.block_table) == 0
+    if image:
+        assert seq.status == SequenceStatus.FINISHED
+        assert seq.leave_reason.startswith("unschedulable:")
+        assert scheduler.take_rejected() == [seq] and not scheduler.waiting
+    else:
+        assert seq.status == SequenceStatus.WAITING
+        assert list(scheduler.waiting) == [seq] and not scheduler.take_rejected()
 
 
 @pytest.mark.parametrize("stream", [False, True])

@@ -216,7 +216,8 @@ the requirement does not ask for.
 **D4. The shared multimodal generator carries `kv_transfer_params` on
 the chat path.** `generate_async_multimodal` takes `kv_transfer_params`,
 passes it on as `generate_async` does, and returns
-`kv_transfer_output_meta_info` with the sequence's `cache_seed` added; the
+`kv_transfer_output_meta_info` with the sequence's `cache_seed` and
+`mrope_position_delta` added; the
 chat multimodal branches (streaming, non-streaming, n>1) pass it.
 `_prepare_engine_input` keeps its refusal of images with
 `kv_transfer_params`: it serves only `/v1/messages` and `/v1/responses`,
@@ -241,7 +242,12 @@ only. Rejected: ATOMesh strips image parts from D's body, which saves bytes
 no item measures and leaves other routers hitting the engine's refetch.
 
 **D6. D's prefix-cache identity comes from P.** D sets `Sequence.cache_seed`
-from the `cache_seed` in `kv_transfer_params`. Basis: code
+from the `cache_seed` in `kv_transfer_params`, and
+`Sequence.mrope_position_delta` from P's delta beside it, which an MRoPE
+model's decode positions need. D cannot recompute a preempted image
+sequence without its media, so `Scheduler.preempt` finishes it with an
+`unschedulable` error instead ([#34](https://github.com/junyyang-amd/ATOM/issues/34)
+tracks recovering it). Basis: code
 `atom/model_engine/sequence.py` derives `cache_seed` from media only, and
 `block_manager.py` seeds the hash chain with it; without it D hashes the
 expanded ids alone and two images with the same text could share KV (A3
@@ -520,8 +526,11 @@ stays), and no embedding cache beyond E's lease.
   D13).
 - `atom/entrypoints/openai/protocol.py`: `ec_transfer_params` on the chat
   request and response (D13).
-- `atom/model_engine/sequence.py`: `cache_seed` taken from
-  `kv_transfer_params` on a pretokenized remote-prefill request (D6).
+- `atom/model_engine/sequence.py`: `cache_seed` and
+  `mrope_position_delta` taken from `kv_transfer_params` on a
+  pretokenized remote-prefill request (D6).
+- `atom/model_engine/scheduler.py`: `preempt` fails an image decode
+  sequence that holds no media (D6).
 - `atom/config.py`, `atom/model_engine/arg_utils.py`: `encoder_only` (D10).
 - `atom/utils/envs.py`: `ATOM_EC_LEASE_S` (D12).
 - New encoder module (vision-only model build, weight load, encode queue)
