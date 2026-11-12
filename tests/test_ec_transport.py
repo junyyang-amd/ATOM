@@ -118,6 +118,25 @@ def test_p_reads_stored_rows_until_lease_expires_and_slot_is_reused(engines):
     assert torch.equal(reader.read(params2, 12, torch.bfloat16), rows(2))
 
 
+def test_read_racing_a_slot_reuse_sees_a_changed_word(engines, monkeypatch):
+    clock = Clock()
+    pool = ec.EcPool(320, "cpu", clock=clock)
+    reader = ec.EcReader(1024, "cpu")
+    params = pool.put(11, rows(1))
+
+    # P reads the old entry at E's first sync of the reuse: the victim is
+    # given up, its old rows not yet overwritten.
+    mid_overwrite = []
+    monkeypatch.setattr(
+        ec,
+        "_sync",
+        lambda buf: mid_overwrite.append(reader.read(params, 11, torch.bfloat16)),
+    )
+    clock.now += LEASE_S
+    pool.put(12, rows(2))
+    assert mid_overwrite[0] is None
+
+
 def test_full_pool_raises_and_keeps_entries_inside_their_lease(engines):
     clock = Clock()
     pool = ec.EcPool(320, "cpu", clock=clock)
