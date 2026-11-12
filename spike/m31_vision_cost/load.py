@@ -28,7 +28,7 @@ column = pq.read_table(MMSTAR, columns=["image"]).column("image").to_pylist()
 
 
 def data_url(i):
-    raw = column[i % len(column)]["bytes"]
+    raw = column[i % len(column)]
     mime = "image/png" if raw[:4] == b"\x89PNG" else "image/jpeg"
     return f"data:{mime};base64," + base64.b64encode(raw).decode()
 
