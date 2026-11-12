@@ -133,7 +133,7 @@ launch_mesh() {
   fi
   local cmd
   cmd=$(printf '%q ' "$target/release/atomesh" launch --host 0.0.0.0 --port "$port" \
-    --prometheus-port "$MESH_METRICS_PORT" "$@")
+    --prometheus-port "$MESH_METRICS_PORT" --model-path "$MODEL_PATH" "$@")
   in_role "$role" -d -e "RUST_LOG=mesh=info,mesh::core::placement::policy_apply=debug" -- \
     bash -c "$cmd > $RUN_DIR/$role.log 2>&1"
   log "waiting for $role (log $RUN_DIR/$role.log)"

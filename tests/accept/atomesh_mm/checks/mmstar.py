@@ -148,6 +148,7 @@ def mmstar_task_dir():
 
 def main():
     task = "mmstar_notoken"
+    ref = reference() if env("REF_TOPOLOGY") else None
     results, samples = run_lmms_eval(
         "mmstar",
         [task],
@@ -166,8 +167,7 @@ def main():
     failures = []
     if result["failed_requests"]:
         failures.append(f"{result['failed_requests']} failed requests")
-    if env("REF_TOPOLOGY"):
-        ref = reference()
+    if ref:
         tolerance = 2 * ref["stderr"]
         result["reference"] = {
             "topology": env("REF_TOPOLOGY"),
