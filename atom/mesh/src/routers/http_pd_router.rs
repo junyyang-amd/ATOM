@@ -736,8 +736,6 @@ impl PDRouter {
         planner: &dyn PdPlanner,
     ) -> Response {
         let endpoint = route_to_endpoint(context.route);
-        self.attach_encode_output(headers, &mut request, &context)
-            .await;
         let observation = crate::observability::request::RequestMetrics::new(
             metrics_labels::ROUTER_HTTP,
             metrics_labels::BACKEND_PD,
@@ -745,6 +743,8 @@ impl PDRouter {
             context.route,
             context.is_stream,
         );
+        self.attach_encode_output(headers, &mut request, &context)
+            .await;
         let response = RetryExecutor::execute_response_with_retry(
             &self.retry_config,
             |_attempt| {
