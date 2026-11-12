@@ -53,10 +53,14 @@ server_flags=(--model "$MODEL" --served-model-name minimax-m3.1 --tensor-paralle
 [[ "$DSPARK" == 0 ]] || server_flags+=(--method dspark --draft-model "$MODEL/dspark" --num-speculative-tokens 7)
 
 # serve <log> <gpus> <server port> <engine port> [extra flags...]
+# Each server gets its own compile caches on the container's disk, as the CI
+# launcher gives each role: two servers sharing ~/.cache/atom race on it.
 serve() {
   local log=$1 gpus=$2 port=$3 engine=$4
+  local c=/tmp/spike-cache/$log
   shift 4
-  docker exec -d -e HIP_VISIBLE_DEVICES="$gpus" "$NAME" bash -c \
+  docker exec -d -e HIP_VISIBLE_DEVICES="$gpus" -e HOME=$c/home -e XDG_CACHE_HOME=$c/xdg \
+    -e TORCHINDUCTOR_CACHE_DIR=$c/torchinductor -e TRITON_CACHE_DIR=$c/triton "$NAME" bash -c \
     "exec python -m atom.entrypoints.openai_server $(printf '%q ' "${server_flags[@]}" "$@") \
     --server-port $port --port $engine > $OUT/$log.log 2>&1"
 }
