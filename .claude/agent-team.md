@@ -4,7 +4,7 @@ integration_branch: EPD
 remote: fork
 never_touch: ROCm/ATOM
 design_entry: CLAUDE.md
-gate_task: black --check . && bash .github/scripts/run_unit_tests.sh && cd atom/mesh && cargo test -- --test-threads=1 --skip vendoring_rejects_unsafe_downloads_and_preserves_sources_on_failure
+gate_task: black --check . && bash .github/scripts/run_unit_tests.sh && cd atom/mesh && cargo test -- --test-threads=1
 new_tests_dir: tests
 publish_language: English
 max_tasks: 3
