@@ -2257,6 +2257,9 @@ async def _chat_completions(
                 return await _encoder_only_response(
                     request_id, len(prompt_or_tokens), multimodal_data
                 )
+            if request.ec_transfer_params is not None:
+                # The prefill encode reads these rows instead of running the tower.
+                multimodal_data["ec_transfer_params"] = request.ec_transfer_params
         elif pretokenized is not None:
             # Reuse prefill IDs to skip template rendering and tokenization.
             prompt_or_tokens = pretokenized
