@@ -6,6 +6,7 @@
 # TOPO=pd: prefill on GPUs 0-3, decode on 4-7 (TP4 each, Mooncake RDMA),
 # ATOMesh --pd-disaggregation, as the CI cell minimax-m3-fp4-1p1d-tp4.
 # DSPARK=0 drops the recipe's three DSpark flags on every server.
+# MC_DISABLE_HIP=0 leaves out the CI cell's MC_DISABLE_HIP=1.
 # Servers start once; GSM8K runs REPS times against them.
 set -euo pipefail
 TOPO=${TOPO:?single or pd}
@@ -17,7 +18,8 @@ IMG=${IMG:-rocm/atom-dev:nightly_202611081546}
 MODEL=${MODEL:-/share_nfs/models/amd/MiniMax-M3.1-Flash-Quark-MXFP4}
 IP=${IP:-$(hostname -I | awk '{print $2}')}
 NAME=${NAME:-epd-5-$TOPO}
-OUT=${OUT:-/share_nfs/junyan_tmp_r120/spike5/$TOPO-dspark$DSPARK-$(date +%m%d-%H%M%S)}
+MC_DISABLE_HIP=${MC_DISABLE_HIP:-1}
+OUT=${OUT:-/share_nfs/junyan_tmp_r120/spike5/$TOPO-dspark$DSPARK-hipoff$MC_DISABLE_HIP-$(date +%m%d-%H%M%S)}
 PORT_P=18510 PORT_D=18520 PORT_M=18500 HANDSHAKE=16301
 TREE=$(pwd -P)
 SPIKE=$TREE/spike/m31_pd_single_node
@@ -26,13 +28,14 @@ mkdir -p "$OUT"
 args=(run -d --name "$NAME" --network host --ipc host --security-opt label=disable
   --device /dev/kfd --device /dev/dri --device /dev/infiniband --group-add video
   --cap-add IPC_LOCK --ulimit memlock=-1:-1 --shm-size 64g
-  -e MC_GID_INDEX=1 -e MC_ENABLE_DEST_DEVICE_AFFINITY=1 -e MC_DISABLE_HIP=1
+  -e MC_GID_INDEX=1 -e MC_ENABLE_DEST_DEVICE_AFFINITY=1
   -e ATOM_HOST_IP="$IP" -e PYTHONUNBUFFERED=1
   -e AITER_LOG_LEVEL=WARNING -e ATOM_FORCE_ATTN_TRITON=1
   -e AITER_QUICK_REDUCE_QUANTIZATION=INT4 -e ATOM_FUSE_MXFP8_SHARED_INTO_MXFP4=1
   -e HOME="$HOME" -e HF_HOME=/share_nfs/junyan_tmp_r120/hf -e PYTHONPATH="$TREE"
   -v "$HOME:$HOME" -v /share_nfs:/share_nfs
   -v "$(dirname "$ATOMESH"):/opt/spike-mesh:ro" -w "$TREE")
+[[ "$MC_DISABLE_HIP" == 0 ]] || args+=(-e MC_DISABLE_HIP=1)
 host_ionic="$(readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1 2>/dev/null || true)"
 [[ -z "$host_ionic" ]] || args+=(-v "$host_ionic:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
 [[ ! -e /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so ]] || args+=(
@@ -89,13 +92,18 @@ docker exec -d "$NAME" bash -c "exec /opt/spike-mesh/$(basename "$ATOMESH") laun
   --log-level info > $OUT/mesh.log 2>&1"
 until curl -sf "http://127.0.0.1:$PORT_M/health" >/dev/null; do sleep 2; done
 
+# RDMA bytes received over every HCA on the node: which transport carried the KV.
+rdma_rx() { cat /sys/class/infiniband/*/ports/1/hw_counters/rx_rdma_ucast_bytes | paste -sd+ | bc; }
 for r in $(seq "$REPS"); do
   offset=$(stat -c %s "$OUT/mesh.log")
+  rx0=$(rdma_rx)
   docker exec "$NAME" lm_eval --model local-chat-completions \
     --model_args "model=minimax-m3.1,base_url=http://127.0.0.1:$PORT_M/v1/chat/completions,tokenizer=$MODEL,tokenized_requests=False,num_concurrent=16,max_gen_toks=16384" \
     --tasks gsm8k --num_fewshot 5 --apply_chat_template --fewshot_as_multiturn --limit "$LIMIT" \
     --gen_kwargs "temperature=0,reasoning_effort=max,max_gen_toks=16384,until=<|no_stop_string|>" \
     --log_samples --output_path "$OUT/gsm8k-run$r" > "$OUT/gsm8k-run$r.log" 2>&1
-  docker exec "$NAME" python3 "$SPIKE/score.py" --label "$TOPO dspark=$DSPARK run $r" \
-    --results "$OUT/gsm8k-run$r" --mesh-log "$OUT/mesh.log" --offset "$offset" | tee -a "$OUT/score.jsonl"
+  sleep 3 # the HCA counters refresh with a delay
+  docker exec "$NAME" python3 "$SPIKE/score.py" --label "$TOPO dspark=$DSPARK mc_disable_hip=$MC_DISABLE_HIP run $r" \
+    --results "$OUT/gsm8k-run$r" --mesh-log "$OUT/mesh.log" --offset "$offset" \
+    --rdma-rx-bytes $(($(rdma_rx) - rx0)) | tee -a "$OUT/score.jsonl"
 done

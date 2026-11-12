@@ -21,6 +21,7 @@ def main() -> None:
     ap.add_argument("--results", type=Path, required=True)
     ap.add_argument("--mesh-log", type=Path, required=True)
     ap.add_argument("--offset", type=int, default=0)
+    ap.add_argument("--rdma-rx-bytes", type=int, default=0)
     a = ap.parse_args()
 
     (results,) = a.results.rglob("results_*.json")
@@ -47,6 +48,7 @@ def main() -> None:
                 "mesh_requests": len(codes),
                 "failed_requests": failed,
                 "empty_responses": empty,
+                "rdma_rx_gib": round(a.rdma_rx_bytes / 2**30, 2),
             }
         )
     )
