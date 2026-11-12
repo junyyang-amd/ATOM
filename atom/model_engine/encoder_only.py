@@ -156,6 +156,9 @@ def create_encoder_only(config: Config) -> EncoderOnly:
     encoder.eval()
     free, total = torch.cuda.mem_get_info(device)
     pool_bytes = int(total * config.gpu_memory_utilization) - (total - free)
+    # Mooncake registers a region this large in slices, and registration fails
+    # when a slice starts inside a 2 MiB GPU page: whole GiB keep them aligned.
+    pool_bytes = pool_bytes >> 30 << 30
     if pool_bytes <= 0:
         raise ValueError(
             f"--gpu-memory-utilization {config.gpu_memory_utilization} leaves no "
