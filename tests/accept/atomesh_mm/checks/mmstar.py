@@ -29,20 +29,44 @@ def stderr(score, n):
     return math.sqrt(score * (1 - score) / n)
 
 
-def run_lmms_eval(name, tasks, gen_kwargs, concurrency, include_path=None):
-    """Run lmms-eval on tasks against ENDPOINT, one attempt per request.
+# lmms-eval's OpenAI client builds its SDK client with the SDK's 600 s timeout
+# and two silent retries, and sends no sampling parameter but the
+# temperature. Run it with a client that waits as long as ATOMesh does, never
+# retries, and adds the check's extra request fields.
+LMMS_EVAL_MAIN = """
+import json, sys
+import openai
+import lmms_eval.models.simple.openai as backend
+extra = json.loads(sys.argv.pop(1))
+
+def client(*args, **kwargs):
+    sdk = openai.OpenAI(*args, timeout=14400, max_retries=0, **kwargs)
+    create = sdk.chat.completions.create
+    sdk.chat.completions.create = lambda **body: create(**extra, **body)
+    return sdk
+
+backend.OpenAI = client
+from lmms_eval.__main__ import cli_evaluate
+cli_evaluate()
+"""
+
+
+def run_lmms_eval(name, tasks, gen_kwargs, concurrency, include_path=None, extra=None):
+    """Run lmms-eval on tasks against ENDPOINT, one attempt per request, with
+    extra (a dict) added to every request body.
 
     Returns lmms-eval's results per task and, per task, its sample lines.
     """
     out = Path(env("RUN_DIR")) / name
     model_args = (
         f"model={env('SERVED_MODEL')},base_url={env('ENDPOINT')}/v1,api_key=EMPTY,"
-        f"timeout=14400,max_retries=1,num_concurrent={concurrency},max_size_in_mb=50"
+        f"max_retries=1,num_concurrent={concurrency},max_size_in_mb=50"
     )
     args = [
         sys.executable,
-        "-m",
-        "lmms_eval",
+        "-c",
+        LMMS_EVAL_MAIN,
+        json.dumps(extra or {}),
         "--model",
         "openai",
         "--model_args",
