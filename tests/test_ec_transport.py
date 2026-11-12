@@ -22,8 +22,8 @@ for _fn in ("get_dp_group", "get_tp_group"):
     if not hasattr(sys.modules["aiter.dist.parallel_state"], _fn):
         setattr(sys.modules["aiter.dist.parallel_state"], _fn, MagicMock())
 
-from atom.kv_transfer.disaggregation.mooncake import ec_transport as ec  # noqa: E402
-from atom.kv_transfer.disaggregation.mooncake import (  # noqa: E402
+from atom.kv_transfer.disaggregation.mooncake import ec_transport as ec
+from atom.kv_transfer.disaggregation.mooncake import (
     mooncake_connector as mc,
 )
 
