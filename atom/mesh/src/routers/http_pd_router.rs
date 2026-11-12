@@ -35,6 +35,7 @@ use crate::{
                 BackendAdapter, PairCtx,
             },
             planner::DefaultPlanner,
+            policy_apply::apply_policy,
             registry_adapters::{PolicyRegistryAdapter, WorkerRegistryAdapter},
             traits::PdPlanner,
             types::{PlacementPlan, Protocol, RequestDescriptor},
@@ -69,6 +70,8 @@ pub struct PDRouter {
     pub adapter: Arc<dyn BackendAdapter>,
     /// Set when backend == Atom. enrich_decode_kv is ATOM-specific and not on the trait.
     atom_adapter: Option<Arc<AtomAdapter>>,
+    /// How long P waits on E before encoding the media itself.
+    encode_timeout: Duration,
 }
 
 impl std::fmt::Debug for PDRouter {
@@ -410,6 +413,7 @@ impl PDRouter {
             policies,
             adapter,
             atom_adapter,
+            encode_timeout: Duration::from_secs(ctx.router_config.request_timeout_secs),
         })
     }
 
@@ -727,11 +731,13 @@ impl PDRouter {
     async fn dispatch_pd(
         &self,
         headers: Option<&HeaderMap>,
-        request: Value,
+        mut request: Value,
         context: PDRequestContext<'_>,
         planner: &dyn PdPlanner,
     ) -> Response {
         let endpoint = route_to_endpoint(context.route);
+        self.attach_encode_output(headers, &mut request, &context)
+            .await;
         let observation = crate::observability::request::RequestMetrics::new(
             metrics_labels::ROUTER_HTTP,
             metrics_labels::BACKEND_PD,
@@ -772,6 +778,107 @@ impl PDRouter {
         )
         .await;
         observation.wrap_response(response)
+    }
+
+    /// Runs E for an ATOM chat request with media and adds E's opaque
+    /// `ec_transfer_params` to the body P receives. With no available encode
+    /// worker, or when E fails or times out, the body stays as it was and P
+    /// encodes the media itself.
+    async fn attach_encode_output(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &mut Value,
+        context: &PDRequestContext<'_>,
+    ) {
+        if !matches!(self.backend, BackendType::Atom)
+            || route_to_endpoint(context.route) != metrics_labels::ENDPOINT_CHAT
+            || !AtomAdapter::has_media_parts(body)
+        {
+            return;
+        }
+        let candidates: Vec<_> = self
+            .worker_registry
+            .get_encode_workers()
+            .into_iter()
+            .filter(|w| w.is_available() && context.model_id.is_none_or(|m| w.model_id() == m))
+            .collect();
+        if candidates.is_empty() {
+            debug!("no available encode worker; prefill encodes the media");
+            return;
+        }
+        let policy = self.policy_registry.get_encode_policy();
+        let descriptor = RequestDescriptor {
+            model_id: context.model_id,
+            protocol: Some(Protocol::Http),
+            text: context.request_text,
+            tokens: context.tokens,
+            headers: context.headers.as_deref(),
+            stream: false,
+        };
+        let hash_ring = context
+            .model_id
+            .and_then(|model| self.worker_registry.get_hash_ring(model));
+        let encode = match apply_policy(&candidates, policy.as_ref(), &descriptor, hash_ring).await
+        {
+            Ok(worker) => worker,
+            Err(error) => {
+                warn!(%error, "encode worker selection failed; prefill encodes the media");
+                return;
+            }
+        };
+        MeshMetrics::record_worker_selection(
+            metrics_labels::WORKER_ENCODE,
+            metrics_labels::CONNECTION_HTTP,
+            encode.model_id(),
+            policy.name(),
+        );
+        let _load = WorkerLoadGuard::new(encode.clone(), headers);
+
+        let mut encode_body = body.clone();
+        encode_body["stream"] = Value::Bool(false);
+        if let Some(obj) = encode_body.as_object_mut() {
+            obj.remove("stream_options");
+        }
+        let Ok(post) = self
+            .build_worker_post_with_headers(
+                &self.client,
+                encode.as_ref(),
+                context.route,
+                encode_body,
+                headers,
+                false,
+            )
+            .await
+        else {
+            return;
+        };
+        let params = match self
+            .send_worker(post.timeout(self.encode_timeout), encode.clone(), headers)
+            .await
+        {
+            Ok(res) if res.status().is_success() => match res.json::<Value>().await {
+                Ok(mut answer) => answer
+                    .get_mut("ec_transfer_params")
+                    .filter(|params| params.is_object())
+                    .map(Value::take)
+                    .ok_or_else(|| "response has no ec_transfer_params object".to_string()),
+                Err(error) => Err(error.to_string()),
+            },
+            Ok(res) => {
+                let status = res.status();
+                let text = res.text().await.unwrap_or_default();
+                Err(format!("status {status}: {text}"))
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        match params {
+            Ok(params) => body["ec_transfer_params"] = params,
+            Err(error) => warn!(
+                encode_url = encode.url(),
+                %error,
+                "encode failed; prefill encodes the media"
+            ),
+        }
     }
 
     async fn plan_pd_pair(
@@ -828,6 +935,10 @@ impl PDRouter {
             }
             BackendType::Vllm | BackendType::Atom => {
                 let mut decode_body = body.clone();
+                // E's output is P's input; D receives P's KV instead.
+                if let Some(obj) = decode_body.as_object_mut() {
+                    obj.remove("ec_transfer_params");
+                }
                 if let Err(error) = self.adapter.inject_prefill_fields(&mut body, &ctx) {
                     return Self::handle_serialization_error(error);
                 }
@@ -2488,6 +2599,7 @@ mod tests {
             policies,
             adapter,
             atom_adapter: None,
+            encode_timeout: Duration::from_secs(1),
         }
     }
 
