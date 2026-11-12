@@ -781,17 +781,23 @@ impl PDRouter {
     }
 
     /// Runs E for an ATOM chat request with media and adds E's opaque
-    /// `ec_transfer_params` to the body P receives. With no available encode
-    /// worker, or when E fails or times out, the body stays as it was and P
-    /// encodes the media itself.
+    /// `ec_transfer_params` to the body P receives. A client-supplied
+    /// `ec_transfer_params` is always removed first, so only E's reaches P.
+    /// With no available encode worker, or when E fails or times out, P gets
+    /// the body without it and encodes the media itself.
     async fn attach_encode_output(
         &self,
         headers: Option<&HeaderMap>,
         body: &mut Value,
         context: &PDRequestContext<'_>,
     ) {
-        if !matches!(self.backend, BackendType::Atom)
-            || route_to_endpoint(context.route) != metrics_labels::ENDPOINT_CHAT
+        if !matches!(self.backend, BackendType::Atom) {
+            return;
+        }
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("ec_transfer_params");
+        }
+        if route_to_endpoint(context.route) != metrics_labels::ENDPOINT_CHAT
             || !AtomAdapter::has_media_parts(body)
         {
             return;

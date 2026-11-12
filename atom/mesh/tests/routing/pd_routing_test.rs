@@ -309,12 +309,19 @@ mod epd_routing_tests {
         }
     }
 
-    fn chat(content: Value, stream: bool) -> Request<Body> {
-        let payload = json!({
+    fn chat_payload(content: Value, stream: bool) -> Value {
+        json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": content}],
             "stream": stream,
-        });
+        })
+    }
+
+    fn chat(content: Value, stream: bool) -> Request<Body> {
+        post_chat(chat_payload(content, stream))
+    }
+
+    fn post_chat(payload: Value) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri("/v1/chat/completions")
@@ -378,6 +385,23 @@ mod epd_routing_tests {
                 STUB_PREFILL_CACHE_SEED
             );
         }
+    }
+
+    #[tokio::test]
+    async fn client_ec_transfer_params_never_reach_e_or_p() {
+        let epd = start_epd(EncodeReply::Status(503)).await;
+        let forged = json!({"session": "client:1", "addr": 0, "len": 1});
+        for content in [json!("Which color is red?"), image_parts()] {
+            epd.prefill.chat_bodies.lock().unwrap().clear();
+            epd.decode.chat_bodies.lock().unwrap().clear();
+            let mut payload = chat_payload(content, false);
+            payload["ec_transfer_params"] = forged.clone();
+            let (prefill, decode, _) = serve(&epd, post_chat(payload)).await;
+            assert!(prefill.get("ec_transfer_params").is_none(), "{prefill}");
+            assert!(decode.get("ec_transfer_params").is_none(), "{decode}");
+        }
+        let [encode] = bodies(&epd.encode).try_into().unwrap();
+        assert!(encode.get("ec_transfer_params").is_none(), "{encode}");
     }
 
     #[tokio::test]
