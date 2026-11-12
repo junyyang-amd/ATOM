@@ -128,6 +128,14 @@ fn media_digest(kind: &str, url: &str) -> String {
     )
 }
 
+/// Number of media digests `with_media_digests` put in a routing text.
+pub(crate) fn media_digest_count(text: &str) -> usize {
+    ["\u{1}image:", "\u{1}video:"]
+        .iter()
+        .map(|prefix| text.matches(prefix).count())
+        .sum()
+}
+
 impl InferenceRequest for CompletionRequest {
     fn metadata(&self) -> InferenceMetadata {
         self.metadata_with_text(true)
