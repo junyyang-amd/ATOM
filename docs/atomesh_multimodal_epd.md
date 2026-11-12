@@ -204,8 +204,11 @@ hit rate no acceptance item asks for.
 input (text, else tokens, with media digests) and the media digest count;
 the harness reads it at `RUST_LOG` debug for that module. Basis: code
 `atom/mesh/src/core/placement/policy_apply.rs: apply_policy,
-record_decision`; `atom/mesh/docs/metrics.md` forbids request-level label
-values. Rejected: a response header carrying the key, a public interface
+record_decision`; a metric label cannot carry the key, because
+`atom/mesh/src/observability/metrics/schema.rs: intern_string` interns
+every label string and never frees it, which its comment accepts only for
+bounded label cardinality, so a per-request key would grow memory without
+bound. Rejected: a response header carrying the key, a public interface
 the requirement does not ask for.
 
 ### Multimodal PD
@@ -304,17 +307,29 @@ KV, and the harness names the HCAs: it sets `ATOM_MOONCAKE_IB_DEVICE` on E,
 P and D to the `rocep*` HCAs local to each role's GPUs, as spike #7 passed
 them (`bench.py --ib`). `_select_ib_devices` takes a configured device
 before `_auto_select_ib_device`, which on g15 picks a missing `rdma<N>`
-and leaves Mooncake on TCP (#12). Naming them also moves A4's and A5's KV
-onto RDMA alike, so A5's PD baseline runs on the same transport, and A4's
+and leaves Mooncake on TCP (#12). The variable holds one value per server,
+not per rank: E, on one GPU, registers on its local HCA, but each TP4 rank
+of P and D registers on every HCA listed for its role, and the connector
+advertises `ib_device` as None for a multi-HCA engine
+(`mooncake_connector.py: MooncakeConnector.__init__`). A4's run shows
+whether KV still moves over RDMA that way, by the HCA counters #7 read;
+per-rank selection is #12's fix. Naming them also moves A4's and A5's KV
+onto the same transport, so A5's PD baseline runs on it too, and A4's
 `mmstar` check covers KV over RDMA, which spike #5 did not run. Basis:
 spike #7 measured Mooncake RDMA at 0.56 ms for 16 MiB against 15.5 ms for
 an HTTP pull and 118 ms inline through ATOMesh, on one node; spike #6
-measured a median 11 MB per A5 request; code `embed_multimodal_batch` runs
-the callback inside the forward step, so a fetch blocks every request in
-the batch on every rank; principle: reuse existing dependencies. Rejected:
-HTTP pull from E's host memory, about 200 lines less (#9's estimates), but
-about 11 ms per new image request inside P's forward step. Low confidence:
-see below.
+measured a median 11 MB per A5 request and 8.5 ms of encode per image
+inside a 4-image request; code `embed_multimodal_batch` runs the callback
+inside the forward step, so a fetch blocks every request in the batch on
+every rank; principle: reuse existing dependencies. Rejected: HTTP pull
+from E's host memory, about 200 lines less (#9's estimates). It would
+likely meet A5 as well: about 11 ms per median request against an upper
+bound of 300 to 480 ms saved. But that 11 ms sits in P's forward step,
+where it gives back a third of the 34 ms of encode E removes from it, and
+it accumulates across queued steps as the encode share does; how much of
+the upper bound survives E's hop, fetch, preprocess and encode is
+unmeasured until A5's `ttft` check runs. Mooncake keeps that third for the
+200 lines. Low confidence: see below.
 
 **D12. E keeps an entry for a lease, guarded by a generation word.** E's
 pool reuses space oldest-first, and only once an entry is older than
@@ -389,11 +404,13 @@ although P can serve it.
 ### Topology, models, CI and harness
 
 **D17. E for M3.1 runs on one GPU of a second, owner-named node.** P and D
-take all of g15; PD for A5's comparison runs on g15 as in A4. Basis: #2's
-Acceptance allows owner-named nodes for multi-node runs; project principle
-5. Rejected: E on a D GPU with D's memory utilization lowered, which
-departs from the recipe and muddies A5's comparison. Low confidence: see
-below.
+take all of g15; PD for A5's comparison runs on g15 as in A4. The node must
+reach g15's `rocep*` HCAs over RoCE, so D11's read stays on RDMA; the
+harness confirms it from E's HCA counters, as spike #7 did, and fails the
+run otherwise. Basis: #2's Acceptance allows owner-named nodes for
+multi-node runs; project principle 5; D11. Rejected: E on a D GPU with D's
+memory utilization lowered, which departs from the recipe and muddies A5's
+comparison. Low confidence: see below.
 
 **D18. K3.1 uses the same code at the recipe's TP8.** Its input builder
 already emits spans and `cache_seed`. A6 runs first and gates A7. 1P1D
@@ -449,16 +466,19 @@ from which E's own hop and encode already come.
   one spawned process behind the same queue) inside the encoder module.
 - **D11, the cross-node read.** Spike #7 measured Mooncake on one node
   only; E sits on a second node (D17), so the read P makes in its forward
-  step is unmeasured across nodes, and with it the margin over the HTTP
-  pull. #7's cross-node cell settles it, run once the owner names E's
-  node; no data can be had before then. The A5 margin from D14 holds
-  either way: the saving A5 needs is an upper bound of 32-36% of a median
-  TTFT of 921-1333 ms, about 300 to 480 ms, and even the HTTP pull's
-  single-node 15.5 ms at 16 MiB is a small fraction of it. What the cell
-  can change is D11's choice over the HTTP pull, not whether A5 is
-  reachable.
-- **D17, E's node.** It rests on the owner naming a second node; no data
-  settles it. K3.1 (D18) needs owner-named nodes too.
+  step is unmeasured across nodes. No cross-node figure picks the HTTP pull
+  while the read stays on RDMA, which D17 requires of E's node. The pull's
+  single-node cost (11 ms for a median request) is Python HTTP and host
+  copies over loopback; across nodes it pays the same plus a real network
+  hop, so it does not fall. Mooncake's read across nodes is bound by g15's
+  400 Gb/s HCA ports (`/sys/class/infiniband/*/ports/1/rate`): about 0.25
+  ms of wire time for 11 MB. To match the pull it would have to slow about
+  28-fold, from 0.56 to 15.5 ms at 16 MiB, which only a fall back to TCP
+  does. That leaves the read's own cost to A5's `ttft` check, and nothing
+  to #7's cross-node cell that would change D11.
+- **D17, E's node.** It rests on the owner naming a second node that
+  reaches g15 over RoCE; no data settles it. K3.1 (D18) needs owner-named
+  nodes too.
 - **D19, the CI case.** It reads two files #2 names together
   (`models_atomesh.yaml` holds the case, `atomesh-accuracy-validation.yaml`
   defines how it runs); no data settles a reading. If the owner reads A8
@@ -475,9 +495,10 @@ from which E's own hop and encode already come.
 No interface here exists only upstream, so no sync issue is needed.
 
 Open backlog issues near the runs: #12 (Mooncake auto-selects a missing
-HCA on g15 and falls back to TCP) does not bear on them, because the
-harness names the HCAs (D11), so it stays in the backlog; #11 is a flaky
-upstream tree test the local gate skips.
+HCA on g15 and falls back to TCP) stays in the backlog, because the
+harness names the HCAs (D11); it is also the per-rank fix should A4's run
+show a multi-HCA engine off RDMA. #11 is a flaky upstream tree test the
+local gate skips.
 
 ## Summary
 
