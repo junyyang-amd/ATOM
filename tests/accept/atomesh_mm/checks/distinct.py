@@ -4,11 +4,12 @@ with the engine's prefix cache on (checks/distinct.env).
 
 Passes when each answer names its own color and not the other, ATOMesh's log
 ($RUN_DIR/mesh.log) holds one routing decision event per request, the red
-and blue ones with different key hashes, and the second red request reuses
-more cached prompt tokens than the blue one did. With the text shared, only
-the images' media digests can tell the two routing keys apart, and only the
-images' cache_seed keeps the blue request off the red one's cached KV; the
-second red request shows that KV was there to reuse.
+and blue ones with different key hashes, and the second red request starts
+its prefill further into the engine's prefix cache than the blue one did
+(its first prefill batch's "done" cursor in $RUN_DIR/atom.log). With the
+text shared, only the images' media digests can tell the two routing keys
+apart, and only the images' cache_seed keeps the blue request off the red
+one's cached KV; the second red request shows that KV was there to reuse.
 """
 
 import json
@@ -34,6 +35,8 @@ EVENT_WAIT_S = 30
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 FIELD = re.compile(r"(\w+)=(\"[^\"]*\"|\S+)")
+ARRIVED = re.compile(r"Request (\d+) arrived")
+PREFILL = re.compile(r"Scheduled prefill batch: .*\(done: \[(\d+)\].*req_ids: \((\d+),\)")
 
 
 def png(rgb, side=SIDE):
@@ -57,8 +60,7 @@ def image_url(color):
 
 
 def ask(color):
-    """The answer (content, without reasoning) to the prompt with color's image,
-    and how many of its prompt tokens the engine read from its prefix cache."""
+    """The answer (content, without reasoning) to the prompt with color's image."""
     body = {
         "model": env("SERVED_MODEL"),
         "messages": [
@@ -80,9 +82,7 @@ def ask(color):
     )
     with urllib.request.urlopen(request, timeout=1800) as response:
         reply = json.loads(response.read())
-    usage = reply.get("usage") or {}
-    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
-    return reply["choices"][0]["message"]["content"] or "", cached
+    return reply["choices"][0]["message"]["content"] or ""
 
 
 def decision_events(log):
@@ -110,21 +110,35 @@ def new_events(path, seen):
         time.sleep(1)
 
 
+def prefix_hit(log):
+    """The prompt tokens a request's prefill took from the prefix cache: where
+    the engine's first prefill batch for it starts, in its log lines."""
+    arrived = ARRIVED.search(log)
+    if arrived is None:
+        return None
+    for done, req_id in PREFILL.findall(log):
+        if req_id == arrived.group(1):
+            return int(done)
+    return None
+
+
 def names(answer, color):
     return re.search(rf"\b{color}\b", answer, re.IGNORECASE) is not None
 
 
 def main():
     log = Path(env("RUN_DIR"), "mesh.log")
+    atom_log = Path(env("RUN_DIR"), "atom.log")
     seen = len(decision_events(read_log(log)))
     result, failures = {}, []
     for name, color in REQUESTS:
-        answer, cached = ask(color)
+        start = len(read_log(atom_log))
+        answer = ask(color)
         events = new_events(log, seen)
         seen += len(events)
         result[name] = {
             "answer": answer,
-            "cached_tokens": cached,
+            "prefix_hit": prefix_hit(read_log(atom_log)[start:]),
             "key_hash": events[0].get("key_hash") if len(events) == 1 else None,
             "events": events,
         }
@@ -140,13 +154,14 @@ def main():
     hashes = [result[color]["key_hash"] for color in COLORS]
     if None not in hashes and hashes[0] == hashes[1]:
         failures.append(f"both colors routed on key hash {hashes[0]}")
-    blue, again = result["blue"]["cached_tokens"], result["red_again"]["cached_tokens"]
+    blue, again = result["blue"]["prefix_hit"], result["red_again"]["prefix_hit"]
     if blue is None or again is None:
-        failures.append("a reply carries no usage.prompt_tokens_details.cached_tokens")
+        failures.append(f"no prefill start for a request in {atom_log}")
     elif again <= blue:
         failures.append(
-            f"the second red request reused {again} cached prompt tokens, the blue "
-            f"one {blue}: the red image's KV was not there to tell them apart"
+            f"the second red request took {again} prompt tokens from the prefix "
+            f"cache, the blue one {blue}: the red image's KV was not there to "
+            "tell them apart"
         )
     finish(result, failures)
 
