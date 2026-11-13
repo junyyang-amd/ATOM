@@ -20,7 +20,7 @@ Image = pytest.importorskip("PIL.Image")
 standalone = pytest.importorskip(
     "atom.entrypoints.atomesh.atom_standalone_service", exc_type=ImportError
 )
-from atom.entrypoints.openai import api_server  # noqa: E402
+from atom.entrypoints.openai import api_server
 
 PLACEHOLDER = 42
 ANSWER_TOKEN = 7
