@@ -2755,14 +2755,14 @@ run_eval() {
     eval_extra_args+=(--fewshot_as_multiturn)
   fi
   # A task's own generation_kwargs override the model's max_gen_toks; these do not.
-  if [[ -n "${EVAL_GEN_KWARGS}" ]]; then
+  if [[ -n "${EVAL_GEN_KWARGS:-}" ]]; then
     eval_extra_args+=(--gen_kwargs "${EVAL_GEN_KWARGS}")
   fi
   local eval_model_args_extra=""
   if [[ -n "${EVAL_MAX_GEN_TOKS}" ]]; then
     eval_model_args_extra=",max_gen_toks=${EVAL_MAX_GEN_TOKS}"
   fi
-  if [[ -n "${EVAL_MODEL_ARGS}" ]]; then
+  if [[ -n "${EVAL_MODEL_ARGS:-}" ]]; then
     eval_model_args_extra="${eval_model_args_extra},${EVAL_MODEL_ARGS}"
   fi
   local eval_model_args_base
@@ -2796,15 +2796,18 @@ run_eval() {
       --log_samples \
       --output_path "${result_dir}"
 
-    if ! python3 - "${result_dir}" "${eval_conc}" "${EVAL_THRESHOLD}" "${EVAL_TASK}" "${EVAL_METRIC}" <<'PY'
+    if ! EVAL_TASK="${EVAL_TASK}" EVAL_METRIC="${EVAL_METRIC:-}" \
+      python3 - "${result_dir}" "${eval_conc}" "${EVAL_THRESHOLD}" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
 result_dir = Path(sys.argv[1])
 eval_conc = sys.argv[2]
 threshold = sys.argv[3]
-task, metric = sys.argv[4:6]
+task = os.environ.get("EVAL_TASK") or "gsm8k"
+metric = os.environ.get("EVAL_METRIC") or "exact_match,flexible-extract"
 json_files = list(result_dir.rglob("*.json")) if result_dir.is_dir() else []
 if not json_files:
     print("[eval] ERROR: no result JSON found")
