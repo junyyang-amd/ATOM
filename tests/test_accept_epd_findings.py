@@ -28,13 +28,13 @@ def epd(tmp_path, call):
     """Run `call` after sourcing lib.sh and epd.sh: E on GPU 0, P on 0-3 and
     D on 4-7, beside rdma0-7, each HCA's counters 100 + GPU sent and 200 + GPU
     received."""
-    (tmp_path / "hca").mkdir()
+    (tmp_path / "hca").mkdir(exist_ok=True)
     (tmp_path / "hca" / "node.map").write_text(
         "".join(f"{g} rdma{g}\n" for g in range(8))
     )
     for g in range(8):
         d = tmp_path / "sys" / f"rdma{g}" / "ports" / "1" / "hw_counters"
-        d.mkdir(parents=True)
+        d.mkdir(parents=True, exist_ok=True)
         (d / "tx_rdma_ucast_bytes").write_text(f"{100 + g}\n")
         (d / "rx_rdma_ucast_bytes").write_text(f"{200 + g}\n")
     script = f"""
