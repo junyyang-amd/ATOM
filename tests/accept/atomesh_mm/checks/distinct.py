@@ -119,7 +119,9 @@ def main():
         }
         other = next(c for c in COLORS if c != color)
         if not names(answer, color) or names(answer, other):
-            failures.append(f"the {color} image's answer {answer!r} does not name {color}")
+            failures.append(
+                f"the {color} image's answer {answer!r} does not name {color} alone"
+            )
         if len(events) != 1:
             failures.append(
                 f"{len(events)} routing decision events in {log} for the {color} request"
