@@ -2161,10 +2161,10 @@ models:
             # MMMU questions carry up to 7 images; lm_eval sends one by
             # default, and gives up on a request after 300 s.
             model_args: max_images=7,timeout=3600
-            # mmmu_val caps generation at 512 tokens. M3.1 thinks past 16384
-            # tokens on about a quarter of the questions, and answers nothing.
+            # mmmu_val caps generation at 512 tokens; M3.1's thinking runs
+            # past that cap and leaves the answer empty.
             gen_kwargs: max_gen_toks=65536
-            # 2 x the standard error under the 0.800 measured on g07 (900 questions).
+            # 2 x the standard error under a measured score.
             threshold: 0.77
 
   DeepSeek-V4-Pro-0813:
