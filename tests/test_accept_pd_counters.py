@@ -35,7 +35,9 @@ def counters(tmp_path, call, missing=()):
         on_node() {{ bash -c "${{2//\\/sys\\/class\\/infiniband/{tmp_path}/sys}}"; }}
         {call}
     """
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
 
 
 def test_counters_sum_every_hca(tmp_path):
