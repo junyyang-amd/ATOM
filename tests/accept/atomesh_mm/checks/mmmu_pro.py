@@ -34,7 +34,7 @@ VISION_PROMPT = (
 )
 # A whole line "Answer: X", markdown emphasis and parentheses allowed, so that
 # "Answer: I think it is (C)" is not read as option I.
-ANSWER_LINE = re.compile(r"^\W*Answer:\s*\(?([A-J])\)?\W*$", re.M)
+ANSWER_LINE = re.compile(r"^\W*Answer:\s*\(?([A-J])\)?\W*$", re.MULTILINE)
 
 
 def vision_task_dir():
