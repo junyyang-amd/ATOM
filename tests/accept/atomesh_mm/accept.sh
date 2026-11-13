@@ -76,8 +76,8 @@ fi
 # differences to its JSON line as counter_deltas, with the topology's
 # findings on them (a JSON object of fields, its "failures" a list of
 # reasons), in the files it recorded too (in the client container, which
-# owns them).
-STAGE="$TOPOLOGY counters"
+# owns them). A counter or finding that cannot be read fails the run.
+STAGE="$TOPOLOGY counter read"
 BEFORE=$(topology_counters)
 STATUS=0
 OUTPUT=$("${RUN_CHECK[@]}") || STATUS=$?
