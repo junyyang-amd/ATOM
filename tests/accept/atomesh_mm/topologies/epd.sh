@@ -31,40 +31,32 @@ topology_up() {
   ENDPOINT=$(role_url mesh "$MESH_PORT")
 }
 
-# topology_findings <counter deltas>: the counts above, read from the logs in
-# RUN_DIR, and the run's failures.
+# log_lines <role> <extended regex>: how many lines of the role's log in
+# RUN_DIR match, colour codes stripped, counted on the role's node: another
+# node's view of the shared log can lag behind its writer.
+log_lines() {
+  local cmd
+  cmd="f=$(printf %q "$RUN_DIR/$1.log")
+    [[ -r \$f ]] || { echo \"cannot read \$f\" >&2; exit 2; }
+    sed 's/\x1b\[[0-9;]*m//g' \"\$f\" | grep -cE $(printf %q "$2") || ((\$? == 1))"
+  on_node "$(role_var "$1" NODE)" "$cmd"
+}
+
+# topology_findings <counter deltas>: the counts above and the run's failures.
 topology_findings() {
-  local ranks
+  local ranks image_requests served read_fallbacks
   IFS=, read -ra ranks <<<"$PREFILL_GPUS"
-  python3 - "$1" "${#ranks[@]}" "$RUN_DIR" <<'EOF'
+  # ATOMesh logs a routing decision per pool and request, with the number of
+  # media in the request.
+  image_requests=$(log_lines mesh 'routing decision.*pool="prefill".*media_digests=[1-9]')
+  served=$(log_lines encode '"POST /v1/chat/completions HTTP/1.1" 200')
+  read_fallbacks=$(log_lines prefill 'are unavailable; running the vision tower')
+  python3 - "$1" "${#ranks[@]}" "$image_requests" "$served" "$read_fallbacks" <<'EOF'
 import json
-import re
 import sys
-from pathlib import Path
 
-deltas, ranks, run_dir = json.loads(sys.argv[1]), int(sys.argv[2]), Path(sys.argv[3])
-ansi = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def lines(log):
-    return ansi.sub("", (run_dir / log).read_text(errors="replace")).splitlines()
-
-
-# ATOMesh logs a routing decision per pool and request, with the number of
-# media in the request.
-image_requests = sum(
-    "routing decision" in line
-    and 'pool="prefill"' in line
-    and not re.search(r"media_digests=0\b", line)
-    for line in lines("mesh.log")
-)
-served = sum(
-    '"POST /v1/chat/completions HTTP/1.1" 200' in line for line in lines("encode.log")
-)
-read_fallbacks = sum(
-    "are unavailable; running the vision tower" in line
-    for line in lines("prefill.log")
-)
+deltas = json.loads(sys.argv[1])
+ranks, image_requests, served, read_fallbacks = map(int, sys.argv[2:])
 failures = []
 if not served:
     failures.append("E served no request")
