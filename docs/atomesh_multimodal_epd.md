@@ -117,8 +117,9 @@ and their delta.
 
 ### E/P/D when E cannot serve
 
-No healthy encode worker, an E error, a failed read, a changed generation
-word or a `cache_seed` mismatch all end in P encoding locally, as in PD.
+No healthy encode worker, an E error (a full pool included), a failed read,
+a changed generation word or a `cache_seed` mismatch all end in P encoding
+locally, as in PD.
 
 ```mermaid
 sequenceDiagram
@@ -216,7 +217,8 @@ the requirement does not ask for.
 **D4. The shared multimodal generator carries `kv_transfer_params` on
 the chat path.** `generate_async_multimodal` takes `kv_transfer_params`,
 passes it on as `generate_async` does, and returns
-`kv_transfer_output_meta_info` with the sequence's `cache_seed` added; the
+`kv_transfer_output_meta_info` with the sequence's `cache_seed` and
+`mrope_position_delta` added; the
 chat multimodal branches (streaming, non-streaming, n>1) pass it.
 `_prepare_engine_input` keeps its refusal of images with
 `kv_transfer_params`: it serves only `/v1/messages` and `/v1/responses`,
@@ -241,7 +243,12 @@ only. Rejected: ATOMesh strips image parts from D's body, which saves bytes
 no item measures and leaves other routers hitting the engine's refetch.
 
 **D6. D's prefix-cache identity comes from P.** D sets `Sequence.cache_seed`
-from the `cache_seed` in `kv_transfer_params`. Basis: code
+from the `cache_seed` in `kv_transfer_params`, and
+`Sequence.mrope_position_delta` from P's delta beside it, which an MRoPE
+model's decode positions need. D cannot recompute a preempted image
+sequence without its media, so `Scheduler.preempt` finishes it with an
+`unschedulable` error instead ([#34](https://github.com/junyyang-amd/ATOM/issues/34)
+tracks recovering it). Basis: code
 `atom/model_engine/sequence.py` derives `cache_seed` from media only, and
 `block_manager.py` seeds the hash chain with it; without it D hashes the
 expanded ids alone and two images with the same text could share KV (A3
@@ -334,6 +341,9 @@ unmeasured until A5's `ttft` check runs. Mooncake keeps that third for the
 **D12. E keeps an entry for a lease, guarded by a generation word.** E's
 pool reuses space oldest-first, and only once an entry is older than
 `ATOM_EC_LEASE_S` (defined in `atom/utils/envs.py`, project principle 3).
+When every entry the new rows would overwrite is still inside its lease,
+the pool is full: E answers that request with an error, and ATOMesh falls
+back to PD for it (D16).
 Each entry starts with a generation word E bumps on reuse. P reads the
 payload, then rereads the word; a changed word, a failed read or a
 `cache_seed` other than its own makes P run its own tower, which it keeps
@@ -520,8 +530,11 @@ stays), and no embedding cache beyond E's lease.
   D13).
 - `atom/entrypoints/openai/protocol.py`: `ec_transfer_params` on the chat
   request and response (D13).
-- `atom/model_engine/sequence.py`: `cache_seed` taken from
-  `kv_transfer_params` on a pretokenized remote-prefill request (D6).
+- `atom/model_engine/sequence.py`: `cache_seed` and
+  `mrope_position_delta` taken from `kv_transfer_params` on a
+  pretokenized remote-prefill request (D6).
+- `atom/model_engine/scheduler.py`: `preempt` fails an image decode
+  sequence that holds no media (D6).
 - `atom/config.py`, `atom/model_engine/arg_utils.py`: `encoder_only` (D10).
 - `atom/utils/envs.py`: `ATOM_EC_LEASE_S` (D12).
 - New encoder module (vision-only model build, weight load, encode queue)
