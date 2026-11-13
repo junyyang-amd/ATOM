@@ -1,12 +1,14 @@
-"""Red/blue image distinction through ATOMesh: one text, sent once with a red
-and once with a blue image, one request after the other, with the engine's
-prefix cache on (checks/distinct.env).
+"""Red/blue image distinction through ATOMesh: one text, sent with a red
+image, then a blue one, then the red one again, one request after the other,
+with the engine's prefix cache on (checks/distinct.env).
 
-Passes when each answer names its own color and not the other, and ATOMesh's
-log ($RUN_DIR/mesh.log) holds one routing decision event per request, the two
-with different key hashes. With the text shared, only the images' media
-digests can tell the two routing keys apart, and only the images' cache_seed
-keeps the second request off the first one's cached KV.
+Passes when each answer names its own color and not the other, ATOMesh's log
+($RUN_DIR/mesh.log) holds one routing decision event per request, the red
+and blue ones with different key hashes, and the second red request reuses
+more cached prompt tokens than the blue one did. With the text shared, only
+the images' media digests can tell the two routing keys apart, and only the
+images' cache_seed keeps the blue request off the red one's cached KV; the
+second red request shows that KV was there to reuse.
 """
 
 import json
@@ -21,8 +23,13 @@ from pathlib import Path
 from mmstar import env, finish, run_check
 
 COLORS = {"red": (255, 0, 0), "blue": (0, 0, 255)}
-SIDE = 448  # large enough that the image's tokens fill whole KV blocks
+# Large enough that the image's tokens fill whole prefix-cache hash blocks
+# (block size x DCP size tokens): 2304 tokens on Kimi-K3.1 (14-pixel patches
+# merged 2 x 2), whose hash block at block size 128 and DCP 8 is 1024 tokens.
+SIDE = 1344
 PROMPT = "What color is this image? Answer with one word."
+# The second red request shows what the blue one would have reused.
+REQUESTS = [("red", "red"), ("blue", "blue"), ("red_again", "red")]
 EVENT_WAIT_S = 30
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -50,7 +57,8 @@ def image_url(color):
 
 
 def ask(color):
-    """The answer (content, without reasoning) to the prompt with color's image."""
+    """The answer (content, without reasoning) to the prompt with color's image,
+    and how many of its prompt tokens the engine read from its prefix cache."""
     body = {
         "model": env("SERVED_MODEL"),
         "messages": [
@@ -72,7 +80,9 @@ def ask(color):
     )
     with urllib.request.urlopen(request, timeout=1800) as response:
         reply = json.loads(response.read())
-    return reply["choices"][0]["message"]["content"] or ""
+    usage = reply.get("usage") or {}
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    return reply["choices"][0]["message"]["content"] or "", cached
 
 
 def decision_events(log):
@@ -108,12 +118,13 @@ def main():
     log = Path(env("RUN_DIR"), "mesh.log")
     seen = len(decision_events(read_log(log)))
     result, failures = {}, []
-    for color in COLORS:
-        answer = ask(color)
+    for name, color in REQUESTS:
+        answer, cached = ask(color)
         events = new_events(log, seen)
         seen += len(events)
-        result[color] = {
+        result[name] = {
             "answer": answer,
+            "cached_tokens": cached,
             "key_hash": events[0].get("key_hash") if len(events) == 1 else None,
             "events": events,
         }
@@ -124,11 +135,19 @@ def main():
             )
         if len(events) != 1:
             failures.append(
-                f"{len(events)} routing decision events in {log} for the {color} request"
+                f"{len(events)} routing decision events in {log} for the {name} request"
             )
     hashes = [result[color]["key_hash"] for color in COLORS]
     if None not in hashes and hashes[0] == hashes[1]:
-        failures.append(f"both requests routed on key hash {hashes[0]}")
+        failures.append(f"both colors routed on key hash {hashes[0]}")
+    blue, again = result["blue"]["cached_tokens"], result["red_again"]["cached_tokens"]
+    if blue is None or again is None:
+        failures.append("a reply carries no usage.prompt_tokens_details.cached_tokens")
+    elif again <= blue:
+        failures.append(
+            f"the second red request reused {again} cached prompt tokens, the blue "
+            f"one {blue}: the red image's KV was not there to tell them apart"
+        )
     finish(result, failures)
 
 
