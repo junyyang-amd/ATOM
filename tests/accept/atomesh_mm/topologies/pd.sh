@@ -24,13 +24,13 @@ role_hcas() {
   (IFS=,; echo "${hcas[*]}")
 }
 
-# launch_pd <role> <kv_role> <port> <engine_port>: an ATOM server with the
-# Mooncake connector, its container given the node's RDMA devices and the
-# host's ionic verbs provider, as .github/workflows/atomesh-benchmark.yaml
+# launch_rdma <role> <port> <engine_port> [server args...]: launch_atom with
+# Mooncake on the role's HCAs, its container given the node's RDMA devices and
+# the host's ionic verbs provider, as .github/workflows/atomesh-benchmark.yaml
 # runs PD. MC_DISABLE_HIP=1 keeps Mooncake off its intra-node HIP transport,
 # which garbles M3.1's output.
-launch_pd() {
-  local role=$1 kv_role=$2 port=$3 engine_port=$4 hcas mounts m
+launch_rdma() {
+  local role=$1 hcas mounts m
   hcas=$(role_hcas "$role")
   log "$role registers its KV on $hcas"
   mapfile -t mounts < <(on_node "$(role_var "$role" NODE)" '
@@ -44,8 +44,14 @@ launch_pd() {
   local env=("${ATOM_ENV[@]}" MC_DISABLE_HIP=1 MC_GID_INDEX=1 MC_ENABLE_DEST_DEVICE_AFFINITY=1
     "ATOM_MOONCAKE_IB_DEVICE=$hcas")
   local DOCKER_ARGS=("${docker_args[@]}") ATOM_ENV=("${env[@]}")
-  launch_atom "$role" "$port" "$engine_port" --kv-transfer-config \
-    "{\"kv_connector\": \"mooncake\", \"kv_role\": \"$kv_role\", \"handshake_port\": $HANDSHAKE_PORT}"
+  launch_atom "$@"
+}
+
+# launch_pd <role> <kv_role> <port> <engine_port>: an ATOM server with the
+# Mooncake KV connector.
+launch_pd() {
+  launch_rdma "$1" "$3" "$4" --kv-transfer-config \
+    "{\"kv_connector\": \"mooncake\", \"kv_role\": \"$2\", \"handshake_port\": $HANDSHAKE_PORT}"
 }
 
 topology_up() {
@@ -81,11 +87,13 @@ hca_bytes() {
   echo "$sum"
 }
 
-# topology_counters: one JSON object of counters; accept.sh reads it before
-# and after the check and adds the differences to the check's JSON line.
+# topology_counters: one JSON object of counters, for each of HCA_ROLES;
+# accept.sh reads it before and after the check and adds the differences to
+# the check's JSON line.
+HCA_ROLES=(prefill decode)
 topology_counters() {
   local role dir bytes sep="" out="{"
-  for role in prefill decode; do
+  for role in "${HCA_ROLES[@]}"; do
     for dir in tx rx; do
       bytes=$(hca_bytes "$role" "$dir") || return 1
       out+="$sep\"${role}_hca_${dir}_bytes\": $bytes"

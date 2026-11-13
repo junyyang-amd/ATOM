@@ -12,7 +12,8 @@
 # JSON is also kept as $ACCEPT_DIR/results/<model>/<topology>/<check>.json,
 # where later checks read their references, beside the run's logs. A
 # topology that defines topology_counters adds their change over the check
-# to that line.
+# to that line; one that also defines topology_findings adds the fields it
+# prints, and fails the run on its "failures".
 set -euo pipefail
 
 if (($# != 3)); then
@@ -72,29 +73,46 @@ if ! declare -F topology_counters >/dev/null; then
 fi
 
 # A topology with counters: read them around the check and add their
-# differences to its JSON line as counter_deltas, in the files it recorded
-# too (in the client container, which owns them). A counter that cannot be
-# read fails the run.
+# differences to its JSON line as counter_deltas, with the topology's
+# findings on them (a JSON object of fields, its "failures" a list of
+# reasons), in the files it recorded too (in the client container, which
+# owns them). A counter or finding that cannot be read fails the run.
 STAGE="$TOPOLOGY counter read"
 BEFORE=$(topology_counters)
 STATUS=0
 OUTPUT=$("${RUN_CHECK[@]}") || STATUS=$?
 AFTER=$(topology_counters)
+DELTAS=$(python3 -c '
+import json, sys
+before, after = map(json.loads, sys.argv[1:])
+print(json.dumps({k: after[k] - before[k] for k in after}))' "$BEFORE" "$AFTER")
+FINDINGS={}
+if declare -F topology_findings >/dev/null; then
+  FINDINGS=$(topology_findings "$DELTAS")
+fi
 STAGE=""
 MERGE='
 import json, sys
 from pathlib import Path
-before, after, results_dir, output = sys.argv[1:]
+deltas, findings, results_dir, output = sys.argv[1:]
 line, *verdict = output.splitlines()
 result = json.loads(line)
-before, after = json.loads(before), json.loads(after)
-result["counter_deltas"] = {k: after[k] - before[k] for k in after}
+result["counter_deltas"] = json.loads(deltas)
+findings = json.loads(findings)
+failures = findings.pop("failures", [])
+result.update(findings)
+if failures:
+    reasons = [result["reason"]] if result["reason"] else []
+    result["passed"] = False
+    result["reason"] = "; ".join(reasons + failures)
+    verdict = ["FAIL " + result["reason"]]
 line = json.dumps(result)
 recorded = Path(results_dir, result["model"], result["topology"], result["check"] + ".json")
 for path in (Path(result["run_dir"], "result.json"), recorded):
     if path.exists() and json.loads(path.read_text())["run_dir"] == result["run_dir"]:
         path.write_text(line + "\n")
 print(line, *verdict, sep="\n")
+sys.exit(0 if result["passed"] else 1)
 '
-in_role client python3 -c "$MERGE" "$BEFORE" "$AFTER" "$RESULTS_DIR" "$OUTPUT"
+in_role client python3 -c "$MERGE" "$DELTAS" "$FINDINGS" "$RESULTS_DIR" "$OUTPUT" || STATUS=$?
 exit "$STATUS"
