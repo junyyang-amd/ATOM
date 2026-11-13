@@ -4,12 +4,13 @@
 #   bash tests/accept/atomesh_mm/accept.sh <model> <topology> <check>
 #
 # Sources models/<model>.env (image, model, nodes and GPUs per role, server
-# arguments), brings the deployment up with topologies/<topology>.sh, runs
-# checks/<check>.py (dashes read as underscores) in a client container
-# against it, and removes its containers at exit. stdout carries one JSON line
-# and then PASS or FAIL <reason>; the JSON is also kept as
-# $ACCEPT_DIR/results/<model>/<topology>/<check>.json, where later checks read
-# their references, beside the run's logs.
+# arguments) and then checks/<check>.env when the check has one (what the
+# check needs changed in the profile), brings the deployment up with
+# topologies/<topology>.sh, runs checks/<check>.py (dashes read as
+# underscores) in a client container against it, and removes its containers
+# at exit. stdout carries one JSON line and then PASS or FAIL <reason>; the
+# JSON is also kept as $ACCEPT_DIR/results/<model>/<topology>/<check>.json,
+# where later checks read their references, beside the run's logs.
 set -euo pipefail
 
 if (($# != 3)); then
@@ -33,6 +34,8 @@ for f in "$HERE/models/$MODEL.env" "$HERE/topologies/$TOPOLOGY.sh" "$CHECK_PY"; 
 done
 
 source "$HERE/models/$MODEL.env"
+CHECK_ENV=${CHECK_PY%.py}.env
+[[ ! -f $CHECK_ENV ]] || source "$CHECK_ENV"
 source "$HERE/lib.sh"
 REF_TOPOLOGY=""
 source "$HERE/topologies/$TOPOLOGY.sh"
