@@ -58,13 +58,24 @@ topology_up() {
 }
 
 # hca_bytes <role> <rx|tx>: RDMA bytes the role's HCAs have received or sent.
+# Fails, rather than summing what it got, when a counter cannot be read: a
+# short sum reads as KV that never crossed RDMA.
 hca_bytes() {
-  local hcas hca paths=() sum=0 v
-  IFS=, read -ra hcas <<<"$(role_hcas "$1")"
+  local hcas hca paths=() values sum=0 v
+  hcas=$(role_hcas "$1") || return 1
+  IFS=, read -ra hcas <<<"$hcas"
   for hca in "${hcas[@]}"; do
     paths+=("/sys/class/infiniband/$hca/ports/1/hw_counters/$2_rdma_ucast_bytes")
   done
-  for v in $(on_node "$(role_var "$1" NODE)" "cat ${paths[*]}"); do
+  values=($(on_node "$(role_var "$1" NODE)" "cat ${paths[*]}")) || {
+    log "$1: cannot read the $2 counters of $(IFS=,; echo "${hcas[*]}")"
+    return 1
+  }
+  if ((${#values[@]} != ${#hcas[@]})); then
+    log "$1: ${#values[@]} $2 counters for ${#hcas[@]} HCAs"
+    return 1
+  fi
+  for v in "${values[@]}"; do
     sum=$((sum + v))
   done
   echo "$sum"
@@ -73,10 +84,11 @@ hca_bytes() {
 # topology_counters: one JSON object of counters; accept.sh reads it before
 # and after the check and adds the differences to the check's JSON line.
 topology_counters() {
-  local role dir sep="" out="{"
+  local role dir bytes sep="" out="{"
   for role in prefill decode; do
     for dir in tx rx; do
-      out+="$sep\"${role}_hca_${dir}_bytes\": $(hca_bytes "$role" "$dir")"
+      bytes=$(hca_bytes "$role" "$dir") || return 1
+      out+="$sep\"${role}_hca_${dir}_bytes\": $bytes"
       sep=", "
     done
   done

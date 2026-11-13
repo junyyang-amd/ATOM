@@ -73,11 +73,14 @@ fi
 
 # A topology with counters: read them around the check and add their
 # differences to its JSON line as counter_deltas, in the files it recorded
-# too (in the client container, which owns them).
+# too (in the client container, which owns them). A counter that cannot be
+# read fails the run.
+STAGE="$TOPOLOGY counter read"
 BEFORE=$(topology_counters)
 STATUS=0
 OUTPUT=$("${RUN_CHECK[@]}") || STATUS=$?
 AFTER=$(topology_counters)
+STAGE=""
 MERGE='
 import json, sys
 from pathlib import Path
