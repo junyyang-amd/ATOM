@@ -51,7 +51,7 @@ def test_counters_sum_every_hca(tmp_path):
 def test_missing_counter_file_fails_the_read(tmp_path, call):
     out = counters(tmp_path, call, missing=(2,))
     assert out.returncode != 0
-    assert "prefill: cannot read the tx counters of rdma0,rdma1,rdma2,rdma3" in out.stderr
+    assert "cannot read the tx counters of rdma0,rdma1,rdma2,rdma3" in out.stderr
 
 
 def test_missing_map_fails_the_read(tmp_path):
