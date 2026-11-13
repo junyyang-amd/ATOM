@@ -10,7 +10,9 @@
 # underscores) in a client container against it, and removes its containers
 # at exit. stdout carries one JSON line and then PASS or FAIL <reason>; the
 # JSON is also kept as $ACCEPT_DIR/results/<model>/<topology>/<check>.json,
-# where later checks read their references, beside the run's logs.
+# where later checks read their references, beside the run's logs. A
+# topology that defines topology_counters adds their change over the check
+# to that line.
 set -euo pipefail
 
 if (($# != 3)); then
@@ -58,9 +60,38 @@ topology_up
 STAGE="client container"
 start_client
 STAGE=""
-in_role client \
-  -e "ACCEPT_MODEL=$MODEL" -e "ACCEPT_TOPOLOGY=$TOPOLOGY" -e "ACCEPT_CHECK=$CHECK" \
-  -e "ENDPOINT=$ENDPOINT" -e "SERVED_MODEL=$SERVED_MODEL" -e "RUN_DIR=$RUN_DIR" \
-  -e "RESULTS_DIR=$RESULTS_DIR" -e "REF_TOPOLOGY=$REF_TOPOLOGY" -e "LIMIT=${LIMIT:-}" \
-  -e "MMMU_PRO_REF_STANDARD=${MMMU_PRO_REF_STANDARD:-}" -e "MMMU_PRO_REF_VISION=${MMMU_PRO_REF_VISION:-}" \
-  -- python3 "$CHECK_PY"
+RUN_CHECK=(in_role client
+  -e "ACCEPT_MODEL=$MODEL" -e "ACCEPT_TOPOLOGY=$TOPOLOGY" -e "ACCEPT_CHECK=$CHECK"
+  -e "ENDPOINT=$ENDPOINT" -e "SERVED_MODEL=$SERVED_MODEL" -e "RUN_DIR=$RUN_DIR"
+  -e "RESULTS_DIR=$RESULTS_DIR" -e "REF_TOPOLOGY=$REF_TOPOLOGY" -e "LIMIT=${LIMIT:-}"
+  -e "MMMU_PRO_REF_STANDARD=${MMMU_PRO_REF_STANDARD:-}" -e "MMMU_PRO_REF_VISION=${MMMU_PRO_REF_VISION:-}"
+  -- python3 "$CHECK_PY")
+if ! declare -F topology_counters >/dev/null; then
+  "${RUN_CHECK[@]}"
+  exit
+fi
+
+# A topology with counters: read them around the check and add their
+# differences to its JSON line as counter_deltas, in the files it recorded
+# too (in the client container, which owns them).
+BEFORE=$(topology_counters)
+STATUS=0
+OUTPUT=$("${RUN_CHECK[@]}") || STATUS=$?
+AFTER=$(topology_counters)
+MERGE='
+import json, sys
+from pathlib import Path
+before, after, results_dir, output = sys.argv[1:]
+line, *verdict = output.splitlines()
+result = json.loads(line)
+before, after = json.loads(before), json.loads(after)
+result["counter_deltas"] = {k: after[k] - before[k] for k in after}
+line = json.dumps(result)
+recorded = Path(results_dir, result["model"], result["topology"], result["check"] + ".json")
+for path in (Path(result["run_dir"], "result.json"), recorded):
+    if path.exists() and json.loads(path.read_text())["run_dir"] == result["run_dir"]:
+        path.write_text(line + "\n")
+print(line, *verdict, sep="\n")
+'
+in_role client python3 -c "$MERGE" "$BEFORE" "$AFTER" "$RESULTS_DIR" "$OUTPUT"
+exit "$STATUS"
