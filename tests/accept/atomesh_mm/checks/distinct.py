@@ -36,7 +36,9 @@ EVENT_WAIT_S = 30
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 FIELD = re.compile(r"(\w+)=(\"[^\"]*\"|\S+)")
 ARRIVED = re.compile(r"Request (\d+) arrived")
-PREFILL = re.compile(r"Scheduled prefill batch: .*\(done: \[(\d+)\].*req_ids: \((\d+),\)")
+PREFILL = re.compile(
+    r"Scheduled prefill batch: .*\(done: \[(\d+)\].*req_ids: \((\d+),\)"
+)
 
 
 def png(rgb, side=SIDE):

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent / "accept" / "atomesh_mm" / "checks"))
-import distinct  # noqa: E402
+import distinct
 
 PROMPT_TOKENS = 2413
 
