@@ -3,7 +3,8 @@
 # The profile places them (PREFILL_NODE/GPUS, DECODE_NODE/GPUS). Each server
 # registers its KV on the HCAs local to its GPUs, read from hca/<node>.map,
 # and the JSON line carries how many RDMA bytes those HCAs sent and received
-# during the check (topology_counters).
+# during the check (topology_counters). The run fails when P's HCAs sent no
+# RDMA bytes or D's received none: the KV then moved off RDMA, or not at all.
 
 REF_TOPOLOGY=single
 # Below the ports Mooncake's TCP transport picks (about 15000-17000); each
@@ -101,4 +102,26 @@ topology_counters() {
     done
   done
   echo "$out}"
+}
+
+# kv_failures <counter deltas>: a JSON list of the reasons the counters show
+# the KV off RDMA.
+kv_failures() {
+  python3 - "$1" <<'EOF'
+import json
+import sys
+
+deltas = json.loads(sys.argv[1])
+failures = []
+if not deltas["prefill_hca_tx_bytes"]:
+    failures.append("P's HCAs sent no RDMA bytes: the KV left RDMA")
+if not deltas["decode_hca_rx_bytes"]:
+    failures.append("D's HCAs received no RDMA bytes: the KV left RDMA")
+print(json.dumps(failures))
+EOF
+}
+
+# topology_findings <counter deltas>: the run's failures.
+topology_findings() {
+  echo "{\"failures\": $(kv_failures "$1")}"
 }

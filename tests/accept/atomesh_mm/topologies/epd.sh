@@ -10,7 +10,7 @@
 # for their own vision tower (read_fallbacks, one per rank and request). The
 # run fails when E answered none, when every read P made fell back, or when
 # E's HCAs sent no RDMA bytes: P then read the embeddings off RDMA, or not at
-# all.
+# all. It also fails as PD's does when the KV moved off RDMA.
 
 source "$HERE/topologies/pd.sh"
 REF_TOPOLOGY=pd
@@ -44,20 +44,21 @@ log_lines() {
 
 # topology_findings <counter deltas>: the counts above and the run's failures.
 topology_findings() {
-  local ranks image_requests served read_fallbacks
+  local ranks image_requests served read_fallbacks kv
   IFS=, read -ra ranks <<<"$PREFILL_GPUS"
   # ATOMesh logs a routing decision per pool and request, with the number of
   # media in the request.
   image_requests=$(log_lines mesh 'routing decision.*pool="prefill".*media_digests=[1-9]')
   served=$(log_lines encode '"POST /v1/chat/completions HTTP/1.1" 200')
   read_fallbacks=$(log_lines prefill 'are unavailable; running the vision tower')
-  python3 - "$1" "${#ranks[@]}" "$image_requests" "$served" "$read_fallbacks" <<'EOF'
+  kv=$(kv_failures "$1")
+  python3 - "$1" "$kv" "${#ranks[@]}" "$image_requests" "$served" "$read_fallbacks" <<'EOF'
 import json
 import sys
 
 deltas = json.loads(sys.argv[1])
-ranks, image_requests, served, read_fallbacks = map(int, sys.argv[2:])
-failures = []
+failures = json.loads(sys.argv[2])
+ranks, image_requests, served, read_fallbacks = map(int, sys.argv[3:])
 if not served:
     failures.append("E served no request")
 elif read_fallbacks >= served * ranks:

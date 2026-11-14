@@ -66,9 +66,10 @@ def test_counters_cover_e_p_and_d(tmp_path):
     }
 
 
-def findings(tmp_path, served, fell_back, encode_tx):
+def findings(tmp_path, served, fell_back, encode_tx, kv_bytes=5):
     """topology_findings over 3 image requests and a text one, E having
-    answered `served`, P's ranks having fallen back `fell_back` times."""
+    answered `served`, P's ranks having fallen back `fell_back` times, P's
+    HCAs having sent and D's received `kv_bytes`."""
     (tmp_path / "mesh.log").write_text(
         DECISION.format(pool="prefill", media=4) * 3
         + DECISION.format(pool="prefill", media=0)
@@ -78,7 +79,13 @@ def findings(tmp_path, served, fell_back, encode_tx):
         'INFO:     10.0.0.1:1 - "GET /health HTTP/1.1" 200 OK\n' + SERVED * served
     )
     (tmp_path / "prefill.log").write_text(FELL_BACK * fell_back)
-    deltas = json.dumps({"encode_hca_tx_bytes": encode_tx})
+    deltas = json.dumps(
+        {
+            "encode_hca_tx_bytes": encode_tx,
+            "prefill_hca_tx_bytes": kv_bytes,
+            "decode_hca_rx_bytes": kv_bytes,
+        }
+    )
     out = epd(tmp_path, f"topology_findings '{deltas}'")
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
@@ -104,6 +111,15 @@ def test_findings_count_requests_and_fallbacks(tmp_path):
 )
 def test_findings_fail_the_run(tmp_path, served, fell_back, encode_tx, failure):
     assert findings(tmp_path, served, fell_back, encode_tx)["failures"] == [failure]
+
+
+def test_findings_fail_kv_off_rdma(tmp_path):
+    assert findings(tmp_path, served=3, fell_back=0, encode_tx=5, kv_bytes=0)[
+        "failures"
+    ] == [
+        "P's HCAs sent no RDMA bytes: the KV left RDMA",
+        "D's HCAs received no RDMA bytes: the KV left RDMA",
+    ]
 
 
 def test_unreadable_log_fails_the_findings(tmp_path):

@@ -2,8 +2,10 @@
 
 Runs its hca_bytes / topology_counters in bash against a fake sysfs tree: an
 HCA whose counter file cannot be read must fail the read, not shrink the sum.
+Runs its topology_findings on counter deltas: KV off RDMA fails the run.
 """
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -60,3 +62,25 @@ def test_missing_map_fails_the_read(tmp_path):
     out = counters(tmp_path, "PREFILL_NODE=other; hca_bytes prefill tx")
     assert out.returncode != 0
     assert "no HCA map hca/other.map" in out.stderr
+
+
+@pytest.mark.parametrize(
+    "prefill_tx, decode_rx, failures",
+    [
+        (5, 5, []),
+        (0, 5, ["P's HCAs sent no RDMA bytes: the KV left RDMA"]),
+        (5, 0, ["D's HCAs received no RDMA bytes: the KV left RDMA"]),
+    ],
+)
+def test_findings_fail_kv_off_rdma(tmp_path, prefill_tx, decode_rx, failures):
+    deltas = json.dumps(
+        {
+            "prefill_hca_tx_bytes": prefill_tx,
+            "prefill_hca_rx_bytes": 0,
+            "decode_hca_tx_bytes": 0,
+            "decode_hca_rx_bytes": decode_rx,
+        }
+    )
+    out = counters(tmp_path, f"topology_findings '{deltas}'")
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == {"failures": failures}
