@@ -3,6 +3,8 @@
 # image's own ATOM: the decode flags and env of ATOMesh CI Slurm 11899 minus
 # --kv-transfer-config, one server on all 8 GPUs, 48 random prompts
 # (ISL 8192, OSL 1024) at concurrency 48 with PROFILE=1.
+# The server is the image's ATOM; the benchmark script is this tree's
+# (the image's run_benchmark.sh cannot run on ROCm 10.1).
 # Run on the GPU host: bash capture.sh <trace-dir> [image]
 set -euo pipefail
 OUT=$(realpath -m "$1")
@@ -11,6 +13,7 @@ NAME=kimi-tpot-65-server
 PORT=8020
 H=/home/junyan.yang@amd.com
 M=/share_nfs/models/moonshotai/Kimi-K3
+BENCH=$(realpath "$(dirname "$0")/../../scripts/run_benchmark.sh")
 [[ ! -e $OUT ]] || { echo "trace dir $OUT exists; use a fresh one" >&2; exit 1; }
 mkdir -p "$OUT"
 
@@ -51,7 +54,7 @@ done
 echo "server ready"
 
 docker exec -w /app/ATOM "$NAME" bash -c "mkdir -p /app/logs_claude &&
-  bash scripts/run_benchmark.sh $M $PORT 8192 1024 48 1 1" > "$OUT/bench.log" 2>&1
+  bash $BENCH $M $PORT 8192 1024 48 1 1" > "$OUT/bench.log" 2>&1
 tail -25 "$OUT/bench.log"
 
 for i in $(seq 1 90); do  # exporter: .gz present and no orphan .json on all 8 ranks
