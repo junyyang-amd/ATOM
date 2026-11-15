@@ -36,11 +36,24 @@ echo " Profile:        $PROFILE"
 echo " Extra args:     ${EXTRA_ARGS:-none}"
 echo "========================================"
 
+# Number of GPUs holding VRAM. ROCm 10.1 images ship amd-smi only.
+vram_gpu_count() {
+    if command -v rocm-smi > /dev/null; then
+        rocm-smi --showmemuse 2>/dev/null | grep "VRAM%" | awk '{print $NF}' | awk '$1 > 0' | wc -l
+    else
+        # One decimal here: an idle card reads 0.1. Lines end in CRLF.
+        amd-smi monitor -v --csv | awk -F, '
+            { sub(/\r$/, "") }
+            NR == 1 { for (i = 1; i <= NF; i++) if ($i == "vram_percent") c = i; next }
+            c && $c + 0 >= 1' | wc -l
+    fi
+}
+
 # Wait for server ready (dual check: HTTP + GPU VRAM)
 echo "Waiting for server to be ready..."
 for i in $(seq 1 120); do
     if curl -sf "http://localhost:${PORT}/v1/models" > /dev/null 2>&1; then
-        VRAM_COUNT=$(rocm-smi --showmemuse 2>/dev/null | grep "VRAM%" | awk '{print $NF}' | awk '$1 > 0' | wc -l)
+        VRAM_COUNT=$(vram_gpu_count)
         if [ "$VRAM_COUNT" -gt 0 ]; then
             echo "Server is ready! (GPU VRAM loaded on $VRAM_COUNT GPUs)"
             break
