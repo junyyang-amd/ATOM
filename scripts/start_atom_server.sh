@@ -126,12 +126,7 @@ for i in $(seq 1 $MAX_WAIT); do
         if [ "$SMI" = rocm-smi ]; then
             rocm-smi --showpidgpus 2>&1 | grep "PID.*is using" | grep -v "0 DRM" || true
         else
-            amd-smi process --csv 2>/dev/null | awk -F, '
-                { sub(/\r$/, "") }
-                NR == 1 { for (i = 1; i <= NF; i++) c[$i] = i; next }
-                ("vram_mem" in c) && $c["vram_mem"] + 0 > 0 {
-                    print "GPU[" $1 "] PID " $c["pid"] " VRAM " $c["vram_mem"] " B"
-                }' || true
+            amd-smi process 2>&1 | grep -E "GPU:|PID:|VRAM_MEM:" || true
         fi
         # Only what we can BOTH attribute and reach. The pids the smi tool prints
         # are the host's and mean something else in this container, so the
