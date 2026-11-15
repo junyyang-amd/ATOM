@@ -1,14 +1,17 @@
 #!/bin/bash
-# Capture one kineto trace of a Kimi-K3 decode cohort on one node, in the
+# Capture kineto traces of Kimi-K3 decode cohorts on one node, in the
 # image's own ATOM: the decode flags and env of ATOMesh CI Slurm 11899 minus
 # --kv-transfer-config, one server on all 8 GPUs, 48 random prompts
-# (ISL 8192, OSL 1024) at concurrency 48 with PROFILE=1.
+# (ISL 8192, OSL 1024) at concurrency 48 with PROFILE=1, repeated for
+# <cohorts> cohorts (default 3) against the one server; each start/stop writes
+# its own timestamped trace per rank.
 # The server is the image's ATOM; the benchmark script is this tree's
 # (the image's run_benchmark.sh cannot run on ROCm 10.1).
-# Run on the GPU host: bash capture.sh <trace-dir> [image]
+# Run on the GPU host: bash capture.sh <trace-dir> [cohorts] [image]
 set -euo pipefail
 OUT=$(realpath -m "$1")
-IMG=${2:-rocm/atom-dev:ROCm_10.1.0}
+N=${2:-3}
+IMG=${3:-rocm/atom-dev:ROCm_10.1.0}
 NAME=kimi-tpot-65-server
 PORT=8020
 H=/home/junyan.yang@amd.com
@@ -53,15 +56,16 @@ for i in $(seq 1 360); do  # model load + compile + 480 graph captures: up to an
 done
 echo "server ready"
 
-docker exec -w /app/ATOM "$NAME" bash -c "mkdir -p /app/logs_claude &&
-  bash $BENCH $M $PORT 8192 1024 48 1 1" > "$OUT/bench.log" 2>&1
-tail -25 "$OUT/bench.log"
-
-for i in $(seq 1 90); do  # exporter: .gz present and no orphan .json on all 8 ranks
-  gz=$(find "$OUT" -name '*.pt.trace.json.gz' | wc -l)
-  js=$(find "$OUT" -name '*.pt.trace.json' | wc -l)
-  [[ $gz -ge 8 && $js -eq 0 ]] && break
-  [[ $i -lt 90 ]] || { echo "export incomplete: gz=$gz json=$js" >&2; exit 1; }
-  sleep 10
+for k in $(seq 1 "$N"); do
+  docker exec -w /app/ATOM "$NAME" bash -c "mkdir -p /app/logs_claude &&
+    bash $BENCH $M $PORT 8192 1024 48 1 1" > "$OUT/bench.$k.log" 2>&1
+  tail -25 "$OUT/bench.$k.log"
+  for i in $(seq 1 90); do  # exporter: a .gz per rank per cohort, no orphan .json
+    gz=$(find "$OUT" -name '*.pt.trace.json.gz' | wc -l)
+    js=$(find "$OUT" -name '*.pt.trace.json' | wc -l)
+    [[ $gz -ge $((8 * k)) && $js -eq 0 ]] && break
+    [[ $i -lt 90 ]] || { echo "cohort $k export incomplete: gz=$gz json=$js" >&2; exit 1; }
+    sleep 10
+  done
 done
 find "$OUT" -name '*.gz' -exec ls -la {} +

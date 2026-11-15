@@ -1,4 +1,4 @@
-"""Per rank of one kineto capture: kernel events, kernel launches, the
+"""Per trace file (one per rank per cohort) of a kineto capture: kernel events, kernel launches, the
 gpu_user_annotation names with counts, and the share of pure-decode iteration
 time that kernel intervals cover.
 
@@ -97,8 +97,11 @@ def main():
         glob.glob(os.path.join(a.trace_dir, "**/*.pt.trace.json.gz"), recursive=True)
     )
     for path in files:
-        rank = os.path.basename(os.path.dirname(path))
-        print(rank, json.dumps(inspect(path, a.bs)), flush=True)
+        print(
+            os.path.relpath(path, a.trace_dir),
+            json.dumps(inspect(path, a.bs)),
+            flush=True,
+        )
 
 
 if __name__ == "__main__":
