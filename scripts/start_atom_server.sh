@@ -25,42 +25,59 @@ LOG_FILE="/app/logs_claude/atom_server.log"
 export AITER_LOG_LEVEL="${AITER_LOG_LEVEL:-INFO}"
 export KINETO_CONFIG="/home/ljin1/dk/libkineto.conf"
 
+# rocm-smi where present; ROCm 10.1 images ship amd-smi only. Every GPU index
+# below is this tool's.
+if command -v rocm-smi > /dev/null; then SMI=rocm-smi; else SMI=amd-smi; fi
+
 # === Which cards this run owns ===
-# HIP_VISIBLE_DEVICES numbering is not rocm-smi's (measured here: HIP 0 is
+# HIP_VISIBLE_DEVICES numbering is not the smi tool's (measured here: HIP 0 is
 # GPU[3]) and the map does not survive a reboot, so resolve it through the PCI
 # bus now. Unset means the whole box, which is all this script used to assume.
 OWNED_GPUS=""
 if [ -n "${HIP_VISIBLE_DEVICES:-}" ]; then
-    OWNED_GPUS="$(python - <<'PY' || true
-import re, subprocess, torch
+    OWNED_GPUS="$(SMI=$SMI python - <<'PY' || true
+import os, re, subprocess, torch
 
 mine = {
     f"{torch.cuda.get_device_properties(i).pci_bus_id:02X}"
     for i in range(torch.cuda.device_count())
 }
-smi = subprocess.run(["rocm-smi", "--showbus"], capture_output=True, text=True).stdout
-print(" ".join(
-    idx for idx, bus in re.findall(r"GPU\[(\d+)\].*?PCI Bus: \w+:(\w\w):", smi)
-    if bus.upper() in mine
-))
+if os.environ["SMI"] == "rocm-smi":
+    smi = subprocess.run(["rocm-smi", "--showbus"], capture_output=True, text=True).stdout
+    buses = re.findall(r"GPU\[(\d+)\].*?PCI Bus: \w+:(\w\w):", smi)
+else:
+    smi = subprocess.run(["amd-smi", "list", "--csv"], capture_output=True, text=True).stdout
+    buses = re.findall(r"^(\d+),\w+:(\w\w):", smi, re.M)
+print(" ".join(idx for idx, bus in buses if bus.upper() in mine))
 PY
 )"
     [ -n "$OWNED_GPUS" ] || {
-        echo "ERROR: cannot map HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES to rocm-smi indices"
+        echo "ERROR: cannot map HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES to $SMI indices"
         exit 1
     }
-    echo "Owned GPUs: rocm-smi [$OWNED_GPUS] <- HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES"
+    echo "Owned GPUs: $SMI [$OWNED_GPUS] <- HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES"
 fi
 
 # How many OWNED cards hold memory. Empty OWNED_GPUS counts every card.
+# amd-smi prints one decimal (an idle card reads 0.1), rocm-smi an integer.
+# amd-smi's CSV lines end in CRLF.
 owned_in_use() {
-    rocm-smi --showmemuse 2>/dev/null | awk -v owned="$OWNED_GPUS" '
-        /VRAM%/ {
-            idx = $0; sub(/^GPU\[/, "", idx); sub(/\].*/, "", idx)
-            if (owned != "" && index(" " owned " ", " " idx " ") == 0) next
-            if ($NF + 0 > 0) n++
-        }
-        END { print n + 0 }'
+    if [ "$SMI" = rocm-smi ]; then
+        rocm-smi --showmemuse 2>/dev/null | awk -v owned="$OWNED_GPUS" '
+            /VRAM%/ {
+                idx = $0; sub(/^GPU\[/, "", idx); sub(/\].*/, "", idx)
+                if (owned != "" && index(" " owned " ", " " idx " ") == 0) next
+                if ($NF + 0 > 0) n++
+            }
+            END { print n + 0 }'
+    else
+        amd-smi monitor -v --csv 2>/dev/null | awk -F, -v owned="$OWNED_GPUS" '
+            { sub(/\r$/, "") }
+            NR == 1 { for (i = 1; i <= NF; i++) if ($i == "vram_percent") c = i; next }
+            owned != "" && index(" " owned " ", " " $1 " ") == 0 { next }
+            c && $c + 0 >= 1 { n++ }
+            END { print n + 0 }'
+    fi
 }
 
 # Ownership is decidable only on the server process: its EngineCore child
@@ -106,8 +123,17 @@ for i in $(seq 1 $MAX_WAIT); do
     fi
     if [ "$i" -eq "$MAX_WAIT" ]; then
         echo "WARNING: owned GPU memory still in use after ${MAX_WAIT}s:"
-        rocm-smi --showpidgpus 2>&1 | grep "PID.*is using" | grep -v "0 DRM" || true
-        # Only what we can BOTH attribute and reach. The pids rocm-smi prints
+        if [ "$SMI" = rocm-smi ]; then
+            rocm-smi --showpidgpus 2>&1 | grep "PID.*is using" | grep -v "0 DRM" || true
+        else
+            amd-smi process --csv 2>/dev/null | awk -F, '
+                { sub(/\r$/, "") }
+                NR == 1 { for (i = 1; i <= NF; i++) c[$i] = i; next }
+                ("vram_mem" in c) && $c["vram_mem"] + 0 > 0 {
+                    print "GPU[" $1 "] PID " $c["pid"] " VRAM " $c["vram_mem"] " B"
+                }' || true
+        fi
+        # Only what we can BOTH attribute and reach. The pids the smi tool prints
         # are the host's and mean something else in this container, so the
         # blanket `kill -9` this used to do could hit an unrelated local pid --
         # and on a shared box that memory may not be ours to reclaim at all.
@@ -168,7 +194,7 @@ echo "Server started in background (PID: $SERVER_PID)"
 
 # Wait for server ready with GPU verification
 echo "Waiting for server to be ready..."
-for i in $(seq 1 120); do
+for i in $(seq 1 600); do
     if curl -sf "http://localhost:${PORT}/v1/models" > /dev/null 2>&1; then
         VRAM_COUNT=$(owned_in_use)
         if [ "$VRAM_COUNT" -gt 0 ]; then
