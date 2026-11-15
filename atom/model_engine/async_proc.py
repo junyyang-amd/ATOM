@@ -15,6 +15,7 @@ This module provides:
 
 import logging
 import multiprocessing
+import os
 import pickle
 import queue
 import threading
@@ -509,6 +510,11 @@ class AsyncIOProcManager:
         # rank -> exit code, written by the monitor before it tears down.
         self._dead_ranks: dict[int, int | None] = {}
 
+        # HIP init in this process ran rocprofiler-register, which setenv()s
+        # this variable (unseen by os.environ). A worker started with it set
+        # never registers kineto's rocprofiler-sdk tool, so its torch
+        # profiler traces record no GPU events (seen on ROCm 10.1).
+        os.unsetenv("ROCPROFILER_REGISTER_LIBRARY")
         for i in range(proc_num):
             label = f"ModelRunner{i}/{proc_num}"
             # Only rank 0 gets the primary output address
