@@ -1,10 +1,14 @@
-"""Table of the one-node A/B: per launch and ISL, the benchmark's median TPOT
-and the steady TPOT, then per image the mean and min-max over launches.
+"""Table of the one-node A/B: per launch and ISL, the benchmark's median TPOT,
+the steady TPOT and the median ITL, then per image the mean and min-max over
+launches.
 
 The steady TPOT counts only the window in which all 48 requests decode: from
 the last request's first token to the first request's last token. The
 scheduler runs prefill first, so a request that finished prefill early waits
 for the others' prefills, which the benchmark's TPOT books as decode time.
+A stall inside the window still counts. The median ITL is the time of one
+decode step (a streamed chunk carries one step's accepted tokens), stalls
+excluded.
 
 Usage: python3 tpot.py OUT_DIR   (reads OUT_DIR/<image-tag>-r<k>/isl<N>.json)
 """
@@ -45,24 +49,30 @@ def main(out):
         res = json.loads(path.read_text())
         assert res["completed"] == 48, f"{path}: {res['completed']} completed"
         rows.setdefault((isl, tag), []).append(
-            (int(launch), res["median_tpot_ms"], steady_tpot_ms(res))
+            (
+                int(launch),
+                res["median_tpot_ms"],
+                steady_tpot_ms(res),
+                res["median_itl_ms"],
+            )
         )
-    print("| image | ISL | launch | median TPOT ms | steady TPOT ms |")
-    print("|---|---|---|---|---|")
+    names = ("median TPOT", "steady TPOT", "median ITL")
+    print("| image | ISL | launch | " + " | ".join(f"{n} ms" for n in names) + " |")
+    print("|---|---|---|---|---|---|")
     for (isl, tag), runs in sorted(rows.items()):
-        for launch, med, steady in sorted(runs):
-            print(f"| {tag} | {isl} | {launch} | {med:.2f} | {steady:.2f} |")
+        for launch, *vals in sorted(runs):
+            print(f"| {tag} | {isl} | {launch} | " + " | ".join(f"{v:.2f}" for v in vals) + " |")
     print()
-    print("| image | ISL | n | median TPOT mean [min-max] | steady TPOT mean [min-max] |")
-    print("|---|---|---|---|---|")
+    print("| image | ISL | n | " + " | ".join(f"{n} mean [min-max]" for n in names) + " |")
+    print("|---|---|---|---|---|---|")
     stats = {}
     for (isl, tag), runs in sorted(rows.items()):
         cols = []
-        for k in (1, 2):
+        for k in (1, 2, 3):
             v = [r[k] for r in runs]
             stats[isl, tag, k] = (statistics.mean(v), min(v), max(v))
             cols.append("%.2f [%.2f-%.2f]" % stats[isl, tag, k])
-        print(f"| {tag} | {isl} | {len(runs)} | {cols[0]} | {cols[1]} |")
+        print(f"| {tag} | {isl} | {len(runs)} | " + " | ".join(cols) + " |")
     print()
     for isl in sorted({i for i, _ in rows}):
         tags = sorted(t for i, t in rows if i == isl)
@@ -70,11 +80,11 @@ def main(out):
             continue
         new, old = (t for t in tags if "10.1" in t), (t for t in tags if "10.1" not in t)
         new, old = next(new), next(old)
-        for k, label in ((1, "median"), (2, "steady")):
+        for k, label in enumerate(names, 1):
             n, o = stats[isl, new, k], stats[isl, old, k]
             beyond = n[1] > o[2]
             print(
-                f"ISL {isl} {label} TPOT: {new} {n[0]:.2f} vs {old} {o[0]:.2f} ms, "
+                f"ISL {isl} {label}: {new} {n[0]:.2f} vs {old} {o[0]:.2f} ms, "
                 f"gap {100 * (n[0] / o[0] - 1):+.1f}%, "
                 f"{'beyond' if beyond else 'not beyond'} both ranges"
             )
