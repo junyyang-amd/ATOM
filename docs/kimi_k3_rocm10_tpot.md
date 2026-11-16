@@ -30,17 +30,22 @@ sequenceDiagram
     participant P as g08 rank 0: prefill, router, aiperf
     participant D as g07 rank 1: decode
     participant I as itl.py
-    O->>L: pd_ab.sh CASE OUT
+    participant F as docs/kimi_k3_rocm10_tpot/
+    O->>L: pd_ab.sh --issue N CASE OUT
+    L->>P: FlyDSL AOT cache and setup_mesh.sh, per image
+    L->>D: FlyDSL AOT cache, per image
     loop 3 runs per image, images alternating
         L->>P: GPU-idle check, docker run, pd_server_atom.sh, case env
-        L->>D: GPU-idle check, docker run, pd_server_atom.sh, case env
+        L->>D: GPU-idle and no-other-container check, docker run
         P->>D: KV cache over mooncake RDMA, per request
+        L->>D: container list every 30 s, another container voids the run
         P-->>L: aiperf results under OUT
         L->>P: remove own container
         L->>D: remove own container
     end
     L->>I: OUT
     I-->>O: per image mean ITL, mean and min-max; gap
+    I->>F: per-run figures, committed
 ```
 
 The operator runs it once per case. When a case's two ranges overlap, the
@@ -56,6 +61,7 @@ sequenceDiagram
     participant P as g08: aiperf
     participant D as g07: decode, profiler
     participant Z as summarize.py
+    participant F as docs/kimi_k3_rocm10_tpot/
     participant K as breakdown.py
     loop 3 runs per image, alternating, per case
         L->>P: run as A1, trace window env set
@@ -65,7 +71,8 @@ sequenceDiagram
     end
     L->>Z: trace directories
     Z->>Z: steps by real batch size, kernel time per step, idle, over 8 ranks
-    Z-->>K: committed summaries, docs/kimi_k3_rocm10_tpot/
+    Z->>F: per-case per-image summaries, committed
+    F-->>K: the summaries and A1's per-run figures
     K->>K: kernel-name table to components, pooled batch-size weights
     K-->>K: per-component times, traced gap, A1 gaps, explained share
 ```
@@ -109,12 +116,13 @@ report ## Follow-up links the issue
 
 | Item | Task | Check, from the repository root on a host that reaches both nodes over ssh |
 |---|---|---|
-| A1 | T1 | `bash scripts/kimi_k3_tpot/pd_ab.sh <case> <out-dir>`, once per case |
+| A1 | T1 | `bash scripts/kimi_k3_tpot/pd_ab.sh --issue <T1's issue> <case> <out-dir>`, once per case |
 | A2 | T2 | `python3 scripts/kimi_k3_tpot/breakdown.py docs/kimi_k3_rocm10_tpot` |
 | A3 | T3 | the `pd_ab.sh` command with the experiment arm, as the report's `## Confirm` gives it |
 | A4 | T4 | `gh issue list --repo junyyang-amd/ATOM --label agent-team/backlog --search "TPOT"` |
 
-The A2 check reads only committed files and needs no GPU.
+The A2 check reads only committed files and needs no GPU: T2's trace
+summaries and T1's per-run figures, both under `docs/kimi_k3_rocm10_tpot/`.
 
 ## Decisions
 
@@ -164,29 +172,62 @@ than as it ran in the reference runs, and whose variable export lives in
 (rank 1).** Basis: code: `pd_server_atom.sh` starts prefill, the ATOMesh
 router and the benchmark on rank 0 and decode on rank `xP`; principle: Run
 only on the nodes the owner named. The decode step is the measured role,
-and g07 runs no one else's work, while g08 hosts another user's
-`fxr_up_*` containers (docker ps, 2026-11-16) whose CPU load would land in
-the decode node's host time between graph replays. Rejected: decode on
-g08, as CI 11899 and 24916 placed it, which puts uncontrolled neighbours
-under the measured role. #64's one-node data came from g08 alone and is not
-compared with these runs.
+and its host must carry no other load during a run. g08 hosts another
+user's `fxr_up_*` containers (docker ps, 2026-11-16), which no agent may
+stop and whose CPU load would land in the decode node's host time between
+graph replays. g07 runs no one else's work but hosts the gate: `gate.sh`
+runs the CPU suite and a cargo build in an `atom-gate:local` container
+there, for every task and review. That load is kept off a run by D5's
+container watch and by the series' task running no gate while its series
+runs. Rejected: decode on g08, as CI 11899 and 24916 placed it, which puts
+neighbours no agent controls under the measured role. #64's one-node data
+came from g08 alone and is not compared with these runs.
 
-**D5. `pd_ab.sh` replaces `pd_slurm_job.sh`; it touches only its own
-containers.** Per run it checks both nodes' GPUs idle, as
-`pd_slurm_job.sh: assert_gpus_idle` does, and stops if not; starts
-`kimi-tpot-63-prefill` on g08 and `kimi-tpot-63-decode` on g07 over ssh
-with `pd_slurm_job.sh: run_container_rank`'s docker flags and env
-(`NODE_RANK`, `IPADDRS`, `NODE0_ADDR`, `xP`, `yD`, the NCCL and MoRI
-settings); waits for rank 0 to exit; and removes both. Deviations, each
-stated in the report: the HCA lists name the nodes' own devices
-(`rdma0`-`rdma7`, from `/sys/class/infiniband`) where CI names
-`ionic_0`-`ionic_7`; logs and traces go under
-`/share_nfs/junyan_tmp_r120/kimi-k3-tpot/`. Basis: code:
-`pd_slurm_job.sh: pre_cleanup_nodes` stops every running container on
-each node, which would stop the `fxr_up_*` containers, and the script
-reads its nodes from a Slurm allocation; local file: never touch another
-user's container, no `--privileged` (`run_container_rank` uses none).
-Rejected: submitting the CI job through Slurm, for the pre-cleanup above.
+**D5. `pd_ab.sh` does over ssh what `pd_slurm_job.sh: run_container_rank`
+does for each rank, on its own containers only.** `pd_ab.sh --issue <n>`
+takes the issue of the task running the series. Per series and image it
+extracts the FlyDSL AOT cache on each node as `prepare_flydsl_aot_cache`
+does and mounts it the same way; on g08 it builds the ATOMesh router
+with `.github/scripts/atomesh/setup_mesh.sh` from this line's tree (the
+case env sets `ATOMESH_BUILD_MESH=true`) and passes the result as
+`ATOMESH_MESH_BINARY`, as `run_container_rank` does on rank 0. Per run it:
+
+- checks both nodes' GPUs idle, as `assert_gpus_idle` does, and that g07
+  runs no container but its own, waiting up to 60 minutes for one to
+  leave, then stops;
+- starts `kimi-tpot-<n>-prefill` on g08 and `kimi-tpot-<n>-decode` on g07
+  with `run_container_rank`'s docker flags, mounts and env (`NODE_RANK`,
+  `IPADDRS`, `NODE0_ADDR`, `xP`, `yD`, its NCCL and MoRI settings with the
+  `ionic_*` HCA lists unchanged);
+- lists g07's containers every 30 s; another container voids the run,
+  which is repeated at once, and a second void in a row stops the series;
+- waits for rank 0 to exit and removes both containers.
+
+It pulls no image: it records each image's ID at the start of the series
+and stops if a tag resolves to another ID before a run. Deviations from
+the CI, each stated in the report: no pull, the container names, and logs
+and traces under `/share_nfs/junyan_tmp_r120/kimi-k3-tpot/`. The env
+files keep `ATOMESH_MODEL_ROOT=/mnt/models`, absent on g07 and g08: no
+script reads it at run time; it only expanded `models_atomesh.yaml`'s
+paths, already expanded in `MODEL_PATH` and `DRAFT_MODEL_PATH` under
+`/share_nfs/models`, present on both nodes. Basis: code:
+`pd_slurm_job.sh: run_container_rank, prepare_flydsl_aot_cache,
+assert_gpus_idle`, `setup_mesh.sh`; the CI's `ionic_*` lists already
+worked on these nodes, whose devices are `rdma0`-`rdma7`: CI 11899 ran
+decode on g08, where mooncake picked its devices itself ("Auto-selecting
+RDMA devices rdma0" in `rank-1/container.log`); local file: never touch
+another user's container, containers named `kimi-tpot-<issue>-<role>`, no
+`--privileged` (`run_container_rank` uses none). Rejected:
+`pd_slurm_job.sh --spur-worker` over ssh on each node with the Spur
+variables set, which reuses all of the above unchanged and whose
+`pre_cleanup_local` keeps other users' containers. It takes its `docker
+run` arguments from no hook, so it cannot carry D10's `/app/ATOM` mount or
+D17's arm arguments without an edit to the CI's own script; it names
+containers `atomesh-<cell>-<job>-<rank>`, against the local file; and it
+pulls the image every run, which lets a moved tag change an arm in the
+middle of a series. Also rejected: submitting the CI job through Slurm,
+which never starts, since the owner's `hold-g07` and `hold-g08` jobs hold
+both nodes and no hold job is ever cancelled.
 
 **D6. No `ATOM_MONO_ENABLE` setting.** With the CI's KV connector the
 decode server turns mono decode off itself. Basis: code:
@@ -239,13 +280,18 @@ line's tree in both images (D1).
 
 **D11. The CI's profile window: decode only, from 900 s into the
 profiling phase, for 30 s; three traced runs per image per case,
-alternating.** `pd_ab.sh --trace` sets `ATOMESH_TORCH_PROFILE_START=900`,
-`ATOMESH_TORCH_PROFILE_DURATION=30` and
-`ATOMESH_TORCH_PROFILE_ROLES=decode` through `ATOMESH_ENV_`, as CI Slurm
-11091 did. Basis: code: `pd_server_atom.sh: run_torch_profile_window`
-opens the window counted from aiperf's profiling phase and stops aiperf
-once every trace is on disk; 11091 used these start and duration values on
-a Kimi-K3 dspark4 case (306 MB per decode node). The window opens after
+alternating.** `pd_ab.sh --trace` adds 11091's profile lines to the case
+env, in their `ATOMESH_ENV_`, `ATOMESH_DECODE_ENV_` and
+`ATOMESH_PREFILL_ENV_` forms: `ATOMESH_TORCH_PROFILE_START=900`,
+`ATOMESH_TORCH_PROFILE_DURATION=30`, `ATOM_PROFILER_TIMEOUT=1800`,
+`ATOM_PROFILER_MORE=0`, and `ATOMESH_TORCH_PROFILE_ROLES=decode` where
+11091 had `prefill,decode`. Basis: code: `pd_server_atom.sh:
+run_torch_profile_window` opens the window counted from aiperf's
+profiling phase and stops aiperf once every trace is on disk, waiting
+`ATOM_PROFILER_TIMEOUT` (default 300 s, `atom/utils/envs.py`) for the
+ranks' exports, and `apply_prefixed_env` exports the `ATOMESH_ENV_` form
+into the script's own shell, where that wait reads it; 11091 used these
+values on a Kimi-K3 dspark4 case (306 MB per decode node). The window opens after
 aiperf's warm-up and 900 s of load, past the first-cohort warm-up #65 saw.
 principle: A number has a spread. Rejected: tracing inside A1's runs,
 which saves the traced runs but ends each A1 run at 930 s, since the
@@ -278,9 +324,12 @@ mix between runs moves by as much as the gap itself.
 **D14. A2's denominator is the traced gap, printed beside two A1 gaps.**
 The breakdown divides by the traced per-step gap (D13), so components,
 idle and gap come from one capture. Beside it it prints A1's mean-ITL gap
-over the same position, seconds 900 to 930 of the profiling phase, from
-A1's `profile_export_aiperf_timeslices.csv` (one slice per second,
-`AIPERF_SLICE_DURATION=1`), and A1's whole-hour gap. If the traced gap is
+over the same position, seconds 900 to 930 of the profiling phase, and
+A1's whole-hour gap, both from T1's committed per-run figures: `itl.py`
+writes one JSON per case to `docs/kimi_k3_rocm10_tpot/` holding, per
+image and run, the whole-hour mean and median ITL and the 900-930 s mean
+ITL from `profile_export_aiperf_timeslices.csv` (one slice per second,
+`AIPERF_SLICE_DURATION=1`). If the traced gap is
 not positive beyond both images' run ranges, T2 stops and diagnoses before
 reporting a share. Basis: the images trace through different back ends
 (rocprofiler-sdk on 10.1, roctracer on 7.2.4; #70), so whether tracing
@@ -343,7 +392,7 @@ A4 without a task.
 
 **D19. One directory `scripts/kimi_k3_tpot/`, one test file, a separate
 report.** Code: `pd_ab.sh` (A1, A2, A3), `cases/` (the env files),
-`itl.py` (A1 and A3 tables, the aligned window of D14), `summarize.py`,
+`itl.py` (A1 and A3 tables, D14's per-run figures), `summarize.py`,
 `breakdown.py` with its pattern table. Tests: `tests/test_kimi_k3_tpot.py`,
 importing the scripts through `sys.path` as
 `tests/test_otel_otlp_process.py` imports `scripts/observability/`.
@@ -356,16 +405,17 @@ where the CI does not run it.
 
 ## Simpler alternative
 
-Run the CI's `pd_slurm_job.sh` on g07 and g08 through Slurm, unchanged,
-and break down one traced run per image with summed kernel durations on
-rank 0. No launcher to write.
+Run the CI's `pd_slurm_job.sh --spur-worker` over ssh on g08 and g07,
+unchanged, and break down one traced run per image with summed kernel
+durations on rank 0. No launcher to write.
 
-It fails a principle and A2. `pd_slurm_job.sh: pre_cleanup_nodes` stops
-every container on both nodes, another user's on g08 included, against
-Run only on the nodes the owner named and the local rule never to touch
-another user's container; one traced run per image has no spread, against
-A number has a spread; and summed durations do not add up to the gap
-across two streams (D12), so A2's explained share has no fixed meaning.
+It fails A2. With no hook for `docker run` arguments the 10.1 server
+cannot run this line's tree at `/app/ATOM`, and the image's own ATOM
+records no GPU events (#65), so 10.1 has no breakdown (D10); one traced
+run per image has no spread, against A number has a spread; and summed
+durations do not add up to the gap across two streams (D12), so A2's
+explained share has no fixed meaning. It also names containers against
+the local file and pulls the image every run (D5).
 
 ## Low confidence
 
@@ -407,22 +457,24 @@ topology's.
 **Non-goals**: as #62, `1p2d-dcp8-dspark4` c48 included (deferred by the
 Ruling on #63).
 
-**GPU time**, from CI Slurm 11899 (about 2 h per untraced run, load to
-shutdown): A1 about 24 h of the node pair, A2 about 14 h (runs end after
-the trace window), A3 about 36 h per experiment tried. Only one 1P1D run
+**GPU time**, from CI Slurm 11899 (dspark4 c48) and 12189 (dspark3 c8),
+about 2 h and 1.3 h per untraced run, load to shutdown: A1 about 20 h of
+the node pair, A2 at most 14 h (runs end after the trace window), A3 about
+30 h per experiment tried. Only one 1P1D run
 fits the two nodes at a time.
 
 **Changes per file**
 
 - `scripts/kimi_k3_tpot/pd_ab.sh`, `cases/*.env`: the launcher and the
   CI settings (D3 to D9, D11).
-- `scripts/kimi_k3_tpot/itl.py`: the A1 and A3 tables and D14's aligned
-  window gap.
+- `scripts/kimi_k3_tpot/itl.py`: the A1 and A3 tables, and the per-run
+  figures D14 reads.
 - `scripts/kimi_k3_tpot/summarize.py`, `breakdown.py`: summaries,
   components (D12 to D16).
 - `tests/test_kimi_k3_tpot.py`: `itl.py`, `summarize.py` and
   `breakdown.py` on synthetic aiperf output and traces.
-- `docs/kimi_k3_rocm10_tpot/`: committed summaries (D16).
+- `docs/kimi_k3_rocm10_tpot/`: T1's per-run figures, one JSON per case
+  (D14), and T2's trace summaries (D16).
 - `docs/kimi_k3_rocm10_tpot_report.md`, `CLAUDE.md`: the report and its
   row (D19).
 
@@ -430,7 +482,7 @@ fits the two nodes at a time.
 
 | Task | Item | Builds | Named result | Effort, code / test |
 |---|---|---|---|---|
-| T1 | A1 | `pd_ab.sh`, `cases/*.env`, `itl.py`, test, report `## Reproduce`, `CLAUDE.md` row | `pd_ab.sh` per case on g07 and g08: per image the mean and min-max mean ITL over 3 runs, and the gap | 250 plus about 300 env lines / 60 |
+| T1 | A1 | `pd_ab.sh`, `cases/*.env`, `itl.py`, test, per-run figures, report `## Reproduce`, `CLAUDE.md` row | `pd_ab.sh` per case on g07 and g08: per image the mean and min-max mean ITL over 3 runs, and the gap; the per-run figures committed | 330 plus about 300 env lines / 60 |
 | T2 | A2 | `--trace` in `pd_ab.sh`, `summarize.py`, `breakdown.py` and table, tests, summaries, `## Breakdown` | `breakdown.py` on the committed summaries: per case, per-component times of both images and an explained share of at least 80% | 330 plus about 800 summary lines / 140 |
 | T3 | A3 | the experiment's arm file, arms in `pd_ab.sh`, `## Confirm` | the three-arm `pd_ab.sh` run per case: after at most 50% of before | 60 / 20 |
 | T4 | A4 | the backlog issue, `## Follow-up` | A4's `gh issue list` showing one issue naming component, repository and candidate owner | 15 / 0 |
