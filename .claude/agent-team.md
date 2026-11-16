@@ -4,7 +4,7 @@ integration_branch: RL
 remote: fork
 never_touch: ROCm/ATOM
 design_entry: CLAUDE.md
-gate_task: black --check . && bash tools/rl/unit_tests.sh && cd atom/mesh && cargo test -- --test-threads=1 --skip vendoring_rejects_unsafe_downloads_and_preserves_sources_on_failure
+gate_task: black --check . && bash tools/rl/unit_tests.sh && cd atom/mesh && cargo test -- --test-threads=1
 new_tests_dir: tests
 publish_language: English
 max_tasks: 3
@@ -22,8 +22,7 @@ push to it, comment on it or open PRs there; the owner upstreams from
 - The gate mirrors the PR CI (black, the CPU unit suite, the ATOMesh Rust
   tests) and needs no GPU. `tools/rl/unit_tests.sh` runs the suite as
   `.github/scripts/run_unit_tests.sh` does, minus the failures present at
-  the line's start, each named there with its issue; the one Rust failure
-  at the start is the `--skip` in `gate_task`, also with its issue.
+  the line's start, each named there with its issue.
   Ruff runs on changed lines only, as CI's reviewdog does (`--exit-zero`, `diff_context`).
 - GPU work (SGLang and ATOM workers, the acceptance harness
   `tools/rl/accept.py`) runs on MI355X nodes over ssh; how to reach them is
