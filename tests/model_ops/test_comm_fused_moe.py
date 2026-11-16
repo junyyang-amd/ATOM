@@ -1015,6 +1015,8 @@ def _mxfp4_method_with_recording_experts(atom_modules):
         "use_triton_ep": False,
         "is_guinterleave": False,
         "fp8_activations": False,
+        # __init__ sets it True only on gfx1250 with HERD enabled.
+        "use_flydsl_herd": False,
         "quant_type": object(),
         "hidden_pad": 0,
         "intermediate_pad": 0,
