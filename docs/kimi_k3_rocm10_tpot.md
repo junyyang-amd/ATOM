@@ -221,10 +221,10 @@ another user's container, containers named `kimi-tpot-<issue>-<role>`, no
 `pd_slurm_job.sh --spur-worker` over ssh on each node with the Spur
 variables set, which reuses all of the above unchanged and whose
 `pre_cleanup_local` keeps other users' containers. It takes its `docker
-run` arguments from no hook, so it cannot carry D10's `/app/ATOM` mount or
-D17's arm arguments without an edit to the CI's own script; it names
-containers `atomesh-<cell>-<job>-<rank>`, against the local file; and it
-pulls the image every run, which lets a moved tag change an arm in the
+run` arguments from no hook, so it cannot carry D17's arm arguments
+without an edit to the CI's own script; it names containers
+`atomesh-<cell>-<job>-<rank>`, against the local file; and it pulls the
+image every run, which lets a moved tag change an arm in the
 middle of a series. Also rejected: submitting the CI job through Slurm,
 which never starts, since the owner's `hold-g07` and `hold-g08` jobs hold
 both nodes and no hold job is ever cancelled.
@@ -259,7 +259,7 @@ whose spread omits launch-to-launch variance.
 
 **D9. One launcher for every run.** A1, A2 and A3 all go through
 `pd_ab.sh` and the case env; a traced run adds only the profile-window
-env (D11) and, in 10.1, this line's tree at `/app/ATOM` (D10); an
+env (D11) and, in 10.1, `ATOMESH_ATOM_SOURCE=mounted` (D10); an
 experiment arm adds only its file of extra `docker run` arguments (D17).
 Basis: principle: Compare like with like; #65's `capture.sh` restated
 flags by hand and drifted from #64's. Rejected: a separate capture
@@ -267,16 +267,25 @@ launcher.
 
 ### What is traced
 
-**D10. ATOM's kineto profiler; 10.1 runs this line's tree at
-`/app/ATOM`.** Basis: spike #65: with #73's fix, 10.1 traces record
-kernels replayed from CUDA graphs and the `decode`, `propose_dspark`,
-`draft_kv` windows; the image's own ATOM records no GPU events. code: `git
-diff 6270386de fork/kimi-k3-tpot -- atom/` touches only
-`atom/model_engine/async_proc.py: AsyncIOProcManager.__init__` (the unset)
-and `atom/mesh/proto/manifest.json`, so the traced 10.1 server differs
+**D10. ATOM's kineto profiler; 10.1 runs this line's tree through
+`ATOMESH_ATOM_SOURCE=mounted`.** `pd_ab.sh --trace` sets it in 10.1's
+env in place of the case's `image`; the tree is already mounted at
+`/workspace/ATOM` (D3). Basis: code: `pd_server_atom.sh` then starts the
+servers from that checkout, whose `atom` shadows the image's editable
+install at `/app/ATOM`, and stops if `atom` resolves anywhere else;
+Kimi-K3 1P1D CI runs used it (Slurm 11157: "[atom] source=mounted
+package=/workspace/ATOM/atom/__init__.py"). spike #65: with #73's fix,
+10.1 traces record kernels replayed from CUDA graphs and the `decode`,
+`propose_dspark`, `draft_kv` windows; the image's own ATOM records no
+GPU events. code: `git diff 6270386de fork/kimi-k3-tpot -- atom/`
+touches only `atom/model_engine/async_proc.py:
+AsyncIOProcManager.__init__` (the unset) and
+`atom/mesh/proto/manifest.json`, so the traced 10.1 server differs
 from A1's only in its workers' environment. 7.2.4 traces through
 roctracer and keeps GPU events in its own ATOM (#70). Rejected: this
-line's tree in both images (D1).
+line's tree in both images (D1); mounting it over `/app/ATOM`, an extra
+`docker run` mount the CI never uses for what one CI variable already
+does.
 
 **D11. The CI's profile window: decode only, from 900 s into the
 profiling phase, for 30 s; three traced runs per image per case,
@@ -328,8 +337,12 @@ over the same position, seconds 900 to 930 of the profiling phase, and
 A1's whole-hour gap, both from T1's committed per-run figures: `itl.py`
 writes one JSON per case to `docs/kimi_k3_rocm10_tpot/` holding, per
 image and run, the whole-hour mean and median ITL and the 900-930 s mean
-ITL from `profile_export_aiperf_timeslices.csv` (one slice per second,
-`AIPERF_SLICE_DURATION=1`). If the traced gap is
+ITL from `profile_export_aiperf_timeslices.csv`: the slices whose
+`Start_NS` minus slice 0's `Start_NS`, the phase start, lies in 900 to
+930 s. aiperf writes no slice for a second without data and numbers only
+the slices it writes, so a slice's index is not its second: in CI 11899
+slice 900 starts 1213 s in, and slice 0 starts 7 ms after the phase's
+`start_time` in `profile_export_aiperf.json`. If the traced gap is
 not positive beyond both images' run ranges, T2 stops and diagnoses before
 reporting a share. Basis: the images trace through different back ends
 (rocprofiler-sdk on 10.1, roctracer on 7.2.4; #70), so whether tracing
@@ -409,13 +422,11 @@ Run the CI's `pd_slurm_job.sh --spur-worker` over ssh on g08 and g07,
 unchanged, and break down one traced run per image with summed kernel
 durations on rank 0. No launcher to write.
 
-It fails A2. With no hook for `docker run` arguments the 10.1 server
-cannot run this line's tree at `/app/ATOM`, and the image's own ATOM
-records no GPU events (#65), so 10.1 has no breakdown (D10); one traced
-run per image has no spread, against A number has a spread; and summed
-durations do not add up to the gap across two streams (D12), so A2's
-explained share has no fixed meaning. It also names containers against
-the local file and pulls the image every run (D5).
+It fails A2. One traced run per image has no spread, against A number
+has a spread; and summed durations do not add up to the gap across two
+streams (D12), so A2's explained share has no fixed meaning. It also
+names containers against the local file and pulls the image every run
+(D5).
 
 ## Low confidence
 
