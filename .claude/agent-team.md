@@ -25,7 +25,7 @@ Agents never post to wuhuikx/LLM-Booster either; the owner does.
 - The gate mirrors the PR CI (black, the CPU unit suite, the ATOMesh Rust
   tests) and needs no GPU. Ruff runs on changed lines only, as CI's
   reviewdog does.
-- GPU work runs only on pit2-p03-g07, g08 and g24, in the two images
+- GPU work runs only on pit2-p03-g07 and g08, in the two images
   above; how to reach them is in the local file. A node whose GPUs are busy
   with someone else's job is a stop: escalate, never kill another user's
   container.
