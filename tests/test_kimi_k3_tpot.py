@@ -222,6 +222,7 @@ def test_breakdown_of_one_summary_as_both_images(summary):
     assert rows["GEMM"] == ["0.012", "0.012", "+0.000"]
     assert rows["unmatched kernels"][0] == "0.007"
     assert rows["step"][0] == "0.100"
+    assert "case-x: 100.0% of steps" in printed
     assert "traced gap: +0.000 ms" in printed
     assert "explained share: n/a" in printed
     assert "A1 gap" not in printed
@@ -275,6 +276,7 @@ def test_breakdown_weights_both_images_by_their_pooled_batch_sizes(tmp_path, out
     assert rows["unmatched kernels"] == ["0.015", "0.015", "+0.000"]
     assert rows["idle"] == ["0.045", "0.040", "+0.005"]
     assert rows["step"] == ["0.150", "0.140", "+0.010"]
+    assert "c: 61.5% of steps at batch sizes every image has" in printed
     assert "traced gap: +0.010 ms (+7.1%)" in printed
     assert "A1 gap, whole hour: +0.277 ms (+1.9%)" in printed
     assert "A1 gap, 900-930 s: +0.587 ms (+4.2%)" in printed

@@ -54,10 +54,12 @@ def pool(runs):
 
 
 def weighted(images):
-    """{image: {row: us per step}} under the pooled batch-size weights."""
+    """{image: {row: us per step}} under the pooled batch-size weights, and the
+    share of all steps whose batch size every image has."""
     sizes = set.intersection(*(set(p) for p in images.values()))
     counts = {bs: sum(p[bs][0] for p in images.values()) for bs in sizes}
     total = sum(counts.values())
+    every = sum(n for p in images.values() for n, _ in p.values())
     out = {}
     for image, p in images.items():
         rows = defaultdict(float)
@@ -65,7 +67,7 @@ def weighted(images):
             for row, us in p[bs][1].items():
                 rows[row] += counts[bs] / total * us
         out[image] = rows
-    return out
+    return out, total / every
 
 
 def a1_gaps(itl_json):
@@ -89,9 +91,9 @@ def report(case, summaries, itl_json):
         if image not in summaries:
             raise SystemExit(f"{case}: no {image} trace summary")
     images = sorted(summaries)
-    rows = weighted({i: pool(summaries[i]["runs"]) for i in images})
+    rows, covered = weighted({i: pool(summaries[i]["runs"]) for i in images})
     lines = [
-        case,
+        f"{case}: {100 * covered:.1f}% of steps at batch sizes every image has",
         f"{'ms per step':<20}" + "".join(f"{i:>22}" for i in images) + f"{'delta':>10}",
     ]
     for row in [c for c, _ in COMPONENTS] + [UNMATCHED, "idle", "step"]:
