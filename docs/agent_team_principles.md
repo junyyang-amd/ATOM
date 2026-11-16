@@ -17,9 +17,9 @@ acceptance belong to the requirement in the umbrella issue.
    runs) and reported as mean and min-max; a difference inside the spread is
    not a finding. Why: TW nodes vary by several percent run to run.
    Source: LLM-Booster#351, the 11-09 tables.
-3. **Run only on the node the owner named.** GPU work uses pit2-p03-g07
-   alone, one GPU job at a time; another node needs a ruling. Why: the
-   owner holds it; others belong to other users or are reserved. Source:
+3. **Run only on the nodes the owner named.** GPU work uses pit2-p03-g07
+   and g08; another node needs a ruling. Why: the owner holds them;
+   others belong to other users or are reserved. Source:
    the owner's decision of 2026-11-16 on #62, junyyang-amd/ATOM#30
    (two Rulings on node placement).
 4. **Settings follow the CI case.** A reproduction uses the launch settings
