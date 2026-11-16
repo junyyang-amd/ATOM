@@ -14,13 +14,14 @@ run's ranks.
 """
 
 import argparse
+import itertools
 import json
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from analyze_trace_summary import load_trace_events, parse_label  # noqa: E402
+from analyze_trace_summary import load_trace_events, parse_label
 
 STEP_WINDOWS = {
     "decode",
@@ -47,7 +48,7 @@ def steps(events):
             kept.append(w)
     return [
         (ts, next_ts, int(label["bs"].split("/")[0]))
-        for (ts, _, label), (next_ts, _, _) in zip(kept, kept[1:])
+        for (ts, _, label), (next_ts, _, _) in itertools.pairwise(kept)
         if label["type"] == "decode" and "p" not in label
     ]
 
