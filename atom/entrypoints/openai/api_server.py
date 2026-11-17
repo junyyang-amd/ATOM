@@ -3709,6 +3709,25 @@ _RL_ROUTES = {
         "update_weights_from_disk",
         ("model_path", "weight_version", "flush_cache"),
     ),
+    "/init_weights_update_group": (
+        "init_weights_update_group",
+        (
+            "master_address",
+            "master_port",
+            "rank_offset",
+            "world_size",
+            "group_name",
+            "backend",
+        ),
+    ),
+    "/update_weights_from_distributed": (
+        "update_weights_from_distributed",
+        ("names", "dtypes", "shapes", "group_name", "weight_version", "flush_cache"),
+    ),
+    "/destroy_weights_update_group": (
+        "destroy_weights_update_group",
+        ("group_name",),
+    ),
 }
 
 
@@ -3843,6 +3862,12 @@ def _rl_route(cmd: str, fields: tuple[str, ...]):
             )
         except Exception as exc:  # noqa: BLE001 - answered as the route's 400
             logger.error("%s failed: %s", cmd, exc)
+            if cmd == "update_weights_from_distributed":
+                logger.error(
+                    "The trainer's broadcast on group %r has no receiver on this "
+                    "engine; the trainer waits on it until its own timeout",
+                    body.get("group_name"),
+                )
             return _rl_reply(False, str(exc))
         return _rl_reply(True, f"{cmd} succeeded")
 
