@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "rl"))
 import accept
-from checks import refit_disk
+from checks import cache, refit_disk
 
 
 @pytest.fixture
@@ -78,7 +78,8 @@ def test_dry_run_plans_two_workers_a_refit_then_a_fresh_worker(
 def fake_atom(stale=(), drift=None, keep_cache=False):
     """A Harness over fake ATOM workers that each answer ``/generate`` by the
     checkpoint they hold. Workers in ``stale`` ignore a refit, ``drift`` is a
-    prompt index the refitted workers answer differently, and with
+    prompt index the refitted workers answer differently (-1: any prompt not
+    in PROMPTS), and with
     ``keep_cache`` a refit leaves the prefix cache in place."""
 
     class FakeAtom(accept.Harness):
@@ -198,3 +199,11 @@ def test_cache_fails_when_the_prefix_survives_the_refit(on_node, monkeypatch, ca
     code, out = _run(monkeypatch, capsys, "cache", fake_atom(keep_cache=True))
     after = [f"http://w{i} cached_tokens 16 after the refit" for i in (0, 1)]
     assert (code, out) == (1, "FAIL cache: " + "; ".join(after))
+
+
+def test_cache_names_the_probe_briefly_when_it_differs_from_fresh(
+    on_node, monkeypatch, capsys
+):
+    code, out = _run(monkeypatch, capsys, "cache", fake_atom(drift=-1))
+    differs = f"prompt 0 {cache.PROBE[:40]!r} differs from fresh"
+    assert (code, out) == (1, f"FAIL cache: http://w0 {differs}; http://w1 {differs}")

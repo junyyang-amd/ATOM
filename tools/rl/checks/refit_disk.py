@@ -63,10 +63,11 @@ def _fanout_ok(status, answer) -> bool:
 
 
 def first_mismatch(prompts, outputs, fresh) -> str | None:
-    """The first prompt whose output token ids differ from the fresh ones."""
+    """The first prompt whose output token ids differ from the fresh ones, by
+    its index and its first 40 characters."""
     for i, (out, want) in enumerate(zip(outputs, fresh, strict=True)):
         if out["output_ids"] != want["output_ids"]:
-            return f"prompt {i} {prompts[i]!r} differs from fresh"
+            return f"prompt {i} {prompts[i][:40]!r} differs from fresh"
     return None
 
 
