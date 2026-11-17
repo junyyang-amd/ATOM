@@ -4,6 +4,8 @@
 # Qwen3-1.7B-Base pairs' references.
 #   spike.sh <out_dir> [runs_per_order]
 set -uo pipefail
+# rocm/atom-dev:nightly_202611081546 lacks jsonschema, which atom imports.
+python -c 'import jsonschema' 2>/dev/null || pip install -q jsonschema || exit 1
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=$1 RUNS=${2:-5}
 HUB=${HF_HOME:-/share_nfs/junyan_tmp_r120/hf}/hub
