@@ -5,9 +5,10 @@ drive.py run --order p|d|both --new <ckpt> --out run.json
     router; once --pause-after have their first token, pause P and D, update both to
     <ckpt>, resume, in that order ("both": each step on the two at once).
 drive.py reference run*.json --out ref.json
-    against a fresh pair on <ckpt>: per completed request, the greedy
-    continuation of its prompt plus the text it had before the resume.
-drive.py table ref.json run*.json
+    against a fresh pair: per completed request, the greedy continuation of
+    its prompt plus the text it had before the resume (none for one done
+    before the pause). Taken on a new-checkpoint pair and an old one.
+drive.py table new_ref.json old_ref.json run*.json
 """
 
 import argparse
@@ -159,8 +160,8 @@ def cmd_reference(args):
     jobs = {}
     for path in args.runs:
         for r in json.loads(Path(path).read_text())["requests"]:
-            if r["outcome"] == "completed" and r["at_pause"] != "done":
-                jobs[(r["idx"], r["pre"])] = None
+            if r["outcome"] == "completed":
+                jobs[(r["idx"], "" if r["at_pause"] == "done" else r["pre"])] = None
 
     def ask(key):
         idx, pre = key
@@ -182,15 +183,23 @@ def cmd_reference(args):
     print(f"{len(ref)} reference continuations")
 
 
-def matches(r, ref) -> bool | None:
-    """Whether the text after the resume is the fresh pair's continuation."""
-    if r["outcome"] != "completed" or r["at_pause"] == "done" or ref is None:
+def weights_seen(r, refs) -> str | None:
+    """Which fresh pair's greedy continuation the text after the resume is:
+    "new", "old", "both" or "neither"; None for a request with none."""
+    if r["outcome"] != "completed" or refs is None:
         return None
-    text = ref.get((r["idx"], r["pre"]))
-    return None if text is None else text.startswith(r["post"])
+    if r["at_pause"] == "done":  # all of it before the pause: the old pair's
+        text = refs["old"].get((r["idx"], ""))
+        return None if text is None else "old" if text == r["pre"] else "neither"
+    if not r["post"]:
+        return None
+    hits = [
+        k for k, ref in refs.items() if ref[(r["idx"], r["pre"])].startswith(r["post"])
+    ]
+    return {0: "neither", 2: "both"}.get(len(hits)) or hits[0]
 
 
-def summary_line(run, ref) -> str:
+def summary_line(run, refs) -> str:
     upd = " ".join(
         f"{side.upper()}={'applied' if a['ok'] else 'refused'}"
         f"({a['s'] if a.get('s') is not None else '-'}s)"
@@ -200,24 +209,28 @@ def summary_line(run, ref) -> str:
     for r in run["requests"]:
         key = (r["at_pause"], r["outcome"])
         counts[key] = counts.get(key, 0) + 1
-        m = matches(r, ref)
-        if m is not None:
-            mk = (r["at_pause"], "equal" if m else "differs")
-            counts[mk] = counts.get(mk, 0) + 1
+        seen = weights_seen(r, refs)
+        if seen is not None:
+            counts[(r["at_pause"], f"{seen}_weights")] = (
+                counts.get((r["at_pause"], f"{seen}_weights"), 0) + 1
+            )
     body = " ".join(f"{a}/{b}={n}" for (a, b), n in sorted(counts.items()))
     return f"order={run['order']} update: {upd} | {body}"
 
 
 def cmd_table(args):
-    ref = None
-    if args.ref != "-":
-        ref = {
-            (r["idx"], r["pre"]): r["text"]
-            for r in json.loads(Path(args.ref).read_text())
+    refs = None
+    if args.new_ref != "-":
+        refs = {
+            side: {
+                (r["idx"], r["pre"]): r["text"]
+                for r in json.loads(Path(path).read_text())
+            }
+            for side, path in (("new", args.new_ref), ("old", args.old_ref))
         }
     for path in args.runs:
         run = json.loads(Path(path).read_text())
-        print(path.rsplit("/", 1)[-1], summary_line(run, ref))
+        print(path.rsplit("/", 1)[-1], summary_line(run, refs))
         for side, a in run["update"].items():
             if not a["ok"]:
                 print(f"  {side.upper()} update: {a['error']}")
@@ -243,7 +256,8 @@ def main():
     f.add_argument("runs", nargs="+")
     f.add_argument("--out", required=True)
     t = sub.add_parser("table")
-    t.add_argument("ref", help="reference json, or - for none")
+    t.add_argument("new_ref", help="the fresh new-weights pair's json, or -")
+    t.add_argument("old_ref", help="the fresh old-weights pair's json, or -")
     t.add_argument("runs", nargs="+")
     args = ap.parse_args()
     {"run": cmd_run, "reference": cmd_reference, "table": cmd_table}[args.cmd](args)

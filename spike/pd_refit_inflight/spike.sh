@@ -1,6 +1,7 @@
 #!/bin/bash
 # The whole spike, inside the rl-92-pd container: five runs per order, each on
-# a freshly started Qwen3-1.7B-Base pair, then the fresh Qwen3-1.7B reference.
+# a freshly started Qwen3-1.7B-Base pair, then fresh Qwen3-1.7B and
+# Qwen3-1.7B-Base pairs' references.
 #   spike.sh <out_dir> [runs_per_order]
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -17,8 +18,11 @@ for i in $(seq "$RUNS"); do
     python "$HERE/drive.py" run --order "$order" --new "$NEW" --out "$OUT/run-$tag.json"
   done
 done
+for side in new old; do
+  [[ $side == new ]] && ckpt=$NEW || ckpt=$OLD
+  "$HERE/pair.sh" down
+  "$HERE/pair.sh" up "$ckpt" "$OUT/logs/ref-$side"
+  python "$HERE/drive.py" reference "$OUT"/run-*.json --out "$OUT/ref-$side.json"
+done
 "$HERE/pair.sh" down
-"$HERE/pair.sh" up "$NEW" "$OUT/logs/reference"
-python "$HERE/drive.py" reference "$OUT"/run-*.json --out "$OUT/ref.json"
-"$HERE/pair.sh" down
-python "$HERE/drive.py" table "$OUT/ref.json" "$OUT"/run-*.json
+python "$HERE/drive.py" table "$OUT/ref-new.json" "$OUT/ref-old.json" "$OUT"/run-*.json
