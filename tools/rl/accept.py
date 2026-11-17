@@ -66,6 +66,8 @@ ATOM_PRELUDE = (
     "python3 -c 'import jsonschema' 2>/dev/null || pip install -q jsonschema "
     "|| exit 1; python3 -c 'import atom; print(\"atom from\", atom.__file__)'; "
 )
+# The tree mounted at its own path, wherever it lives, and run from there.
+TREE_FLAGS = ["-v", f"{TREE}:{TREE}", "-w", str(TREE), "-e", f"PYTHONPATH={TREE}"]
 _TOPICS = ["a lighthouse", "the moon", "bread", "a river", "chess", "rain"]
 _TOPICS += ["a violin", "glaciers"]
 _FORMS = ["Write a short poem about", "Explain to a child", "List three facts about"]
@@ -225,6 +227,15 @@ class Harness:
         )
         return res.stdout.decode(errors="replace")
 
+    def remove_leftovers(self) -> None:
+        """Remove ``rl-<issue>-*`` containers an interrupted run left behind:
+        without a tty, ssh going away does not stop the run, so its teardown
+        never ran and its workers still hold their GPUs."""
+        names = self.sh(["docker", "ps", "-a", "--format", "{{.Names}}"])
+        mine = [n for n in names.split() if n.startswith(f"rl-{self.issue}-")]
+        if mine:
+            self.sh(["docker", "rm", "-f", *mine], check=False)
+
     def teardown(self, log_dir: Path) -> None:
         if self.dry_run:
             return
@@ -300,9 +311,8 @@ class Harness:
             + "exec python3 -m atom.entrypoints.openai_server "
             + shlex.join(argv)
         )
-        flags = ["-w", str(TREE), "-e", f"PYTHONPATH={TREE}"]
         name = self.container(
-            f"atom-{port}", ATOM_IMAGE, ["bash", "-c", run], gpus, flags
+            f"atom-{port}", ATOM_IMAGE, ["bash", "-c", run], gpus, TREE_FLAGS
         )
         return name, f"http://{NODE_IP}:{port}"
 
@@ -345,8 +355,7 @@ class Harness:
                 raise HarnessError(f"trainer GPU {g} is already a worker's")
         self.refuse_busy(gpus)
         self._next_gpu = max(self._next_gpu, max(gpus) + 1)
-        flags = ["-w", str(TREE), "-e", f"PYTHONPATH={TREE}"]
-        return self.container("trainer", ATOM_IMAGE, argv, gpus, flags)
+        return self.container("trainer", ATOM_IMAGE, argv, gpus, TREE_FLAGS)
 
     # -- ATOMesh -----------------------------------------------------------
 
@@ -378,6 +387,8 @@ class Harness:
                 "/share_nfs:/share_nfs",
                 "-v",
                 f"{GATE_DIR}:{GATE_DIR}",
+                "-v",
+                f"{TREE}:{TREE}",
                 "-w",
                 f"{TREE}/atom/mesh",
                 "-e",
@@ -515,6 +526,7 @@ def main(argv=None) -> int:
     started = time.monotonic()
     try:
         wait_for_tree(args.tree_digest)
+        h.remove_leftovers()
         verdict = check.run(h)
     except Exception as e:  # noqa: BLE001 - any failure is the check's FAIL
         verdict = Verdict(False, f"{type(e).__name__}: {e}")

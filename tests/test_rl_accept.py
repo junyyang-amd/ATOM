@@ -54,6 +54,19 @@ def test_atom_workers_start_as_rl_servers_on_their_own_ports():
     ]
 
 
+def test_containers_running_the_tree_mount_it_at_its_own_path():
+    """Mounting /share_nfs alone leaves a tree elsewhere unmounted: docker then
+    creates the -w directory empty and the image's own atom runs."""
+    h = accept.Harness(106, dry_run=True)
+    h.start_atom_workers(1, "/ckpt")
+    h.start_trainer([1], ["python3", "train.py"])
+    h.build_mesh()
+    tree = f"{accept.TREE}:{accept.TREE}"
+    for step in h.steps:
+        argv = shlex.split(step)
+        assert tree in [argv[i + 1] for i, a in enumerate(argv) if a == "-v"], step
+
+
 def test_pd_pair_moves_kv_over_mooncake_tcp():
     h = accept.Harness(111, dry_run=True)
     h.start_pd_pair("/ckpt")
@@ -83,10 +96,11 @@ def test_dry_run_prints_each_container_and_runs_nothing(models, monkeypatch, cap
     assert " ".join(accept.LONG_ROLLOUT) in runs[-1]
 
 
-def fake_mesh(stale=(), selector_required=True):
+def fake_mesh(stale=(), no_selector="selector_required"):
     """A Harness whose ATOMesh answers over two SGLang workers as SMG's protocol
-    says, except that workers in ``stale`` ignore an update and, without
-    ``selector_required``, a fan-out with no selector goes to every worker."""
+    says, except that workers in ``stale`` ignore an update. A fan-out with no
+    selector is refused with 400 and the error code ``no_selector``, or goes to
+    every worker when that is None."""
 
     class FakeMesh(accept.Harness):
         def __init__(self, issue, dry_run=False):
@@ -95,6 +109,9 @@ def fake_mesh(stale=(), selector_required=True):
 
         def model_dir(self, repo):
             return "/ckpt/" + repo
+
+        def remove_leftovers(self):
+            pass
 
         def start_sglang_workers(self, n, model):
             return [f"http://w{i}" for i in range(n)]
@@ -122,8 +139,8 @@ def fake_mesh(stale=(), selector_required=True):
                 version = self.versions[parts[1]]
                 return 200, {"status": 200, "body": {"weight_version": version}}
             selector = parse_qs(url.query).get("selector", [""])[0]
-            if not selector and selector_required:
-                return 400, {"error": "selector_required"}
+            if not selector and no_selector:
+                return 400, {"error": no_selector}
             if selector.startswith("="):
                 return 400, {"error": "invalid_selector"}
             if selector == "engine=vllm":
@@ -169,7 +186,8 @@ def test_mesh_sglang_passes_when_every_route_answers_as_smg(
     "harness,reason",
     [
         (fake_mesh(stale=("w1",)), "model_info w1 after"),
-        (fake_mesh(selector_required=False), "probe selector_required"),
+        (fake_mesh(no_selector=None), "probe selector_required"),
+        (fake_mesh(no_selector="invalid_selector"), "probe selector_required"),
     ],
 )
 def test_mesh_sglang_fails_naming_the_route(
@@ -189,3 +207,28 @@ def test_a_harness_error_is_a_fail(on_node, monkeypatch, capsys):
     code, out = _run(monkeypatch, capsys, Busy)
     assert code == 1 and out == "FAIL mesh_sglang: HarnessError: GPU [0] busy"
     assert not json.loads(on_node.read_text())["passed"]
+
+
+def test_a_run_first_removes_its_issues_leftover_containers(
+    on_node, monkeypatch, capsys
+):
+    """An earlier run whose ssh went away never tore down; its containers hold
+    GPUs, so the next run removes them before taking any."""
+    real_run, calls = accept.subprocess.run, []
+
+    def run(argv, *args, **kwargs):
+        if argv[0] != "docker":
+            return real_run(argv, *args, **kwargs)
+        calls.append(argv)
+        names = "rl-106-sglang-18200\nrl-1060-x\nrl-107-sglang-18200\n"
+        out = names if argv[1] == "ps" else ""
+        return accept.subprocess.CompletedProcess(argv, 0, out, "")
+
+    class Leftovers(fake_mesh()):
+        remove_leftovers = accept.Harness.remove_leftovers
+
+    monkeypatch.setattr(accept.subprocess, "run", run)
+    code, out = _run(monkeypatch, capsys, Leftovers)
+    assert (code, out) == (0, "PASS mesh_sglang")
+    assert ["docker", "rm", "-f", "rl-106-sglang-18200"] in calls
+    assert not [c for c in calls if c[1] == "rm" and "rl-107-sglang-18200" in c]

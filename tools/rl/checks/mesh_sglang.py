@@ -1,4 +1,4 @@
-"""A1: ATOMesh's /v1/rl routes over two SGLang workers.
+"""ATOMesh's /v1/rl routes over two SGLang workers.
 
 Lists the workers, reads each one and its ``model_info`` through the
 per-worker proxy, runs pause -> ``update_weights_from_disk`` -> continue as
