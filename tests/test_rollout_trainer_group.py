@@ -9,7 +9,7 @@ import pytest
 import test_kv_change
 import torch
 from aiter_stub import atom_without_aiter
-from test_collective_rpc_transport import _mgr
+from test_collective_rpc_transport import AsyncIOProcManager, _mgr
 from test_kv_change import _running, _wired
 from torch import nn
 
@@ -254,7 +254,8 @@ def test_the_update_runs_through_the_fence_and_commits_its_version(monkeypatch):
 )
 def test_collective_rpc_refuses_it(method):
     """Called directly, the update would skip the fence, preemption and
-    prefix drop."""
+    prefix drop; reserved, the name can never be opened to it."""
+    assert method in AsyncIOProcManager._RESERVED_RPC_NAMES
     mgr = _mgr(1)
     with pytest.raises(ValueError, match="not open to collective_rpc"):
         mgr.collective_rpc(method, RpcPayload("x"), timeout=5)
