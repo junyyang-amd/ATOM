@@ -740,6 +740,9 @@ class Scheduler:
         # The version of the weights this engine serves; a committed weight
         # update that names one replaces it (`EngineUtilityHandler`).
         self.weight_version = getattr(config, "weight_version", "default")
+        # A P/D producer stamps its handoffs with that version, so the decode
+        # engine can tell KV computed on other weights (`_resolve_waiting_remote_kv`).
+        self.stamps_handoffs = getattr(config, "enable_rl", False)
         pc = getattr(config, "parallel_config", None)
         self.metrics = SchedulerMetrics(
             getattr(pc, "data_parallel_rank", 0)
@@ -3073,6 +3076,15 @@ class Scheduler:
         if self._consume_failed_remote_kv(seq):
             return False
 
+        stamp = (seq.kv_transfer_params or {}).get("weight_version")
+        if (
+            stamp is not None
+            and stamp != self.weight_version
+            and self._pop_req_id(self.finished_recving_kv_req_ids, seq.id)
+        ):
+            self._recompute_stale_remote_kv(seq, stamp)
+            return False
+
         if not self._update_waiting_for_remote_kv(seq):
             skipped_waiting_requests.append(seq)
             return None
@@ -3082,6 +3094,31 @@ class Scheduler:
         # Its prompt was prefilled on the producer.
         seq.prefill_completed = True
         return True
+
+    def _recompute_stale_remote_kv(self, seq: Sequence, stamp: str) -> None:
+        """Prefill here a request whose received KV P computed on other weights.
+
+        Its whole block table goes: the received KV, and any prefix hit claimed
+        before this engine's refit zeroed the pool. The request is admitted
+        again as an ordinary prefill. Unlike a failed receive
+        (`_abort_failed_remote_receive`) it is not aborted: only handoffs that
+        cross a refit are stale, so these prefills are bounded by the requests
+        in flight at that refit. The connector's own bookkeeping ends, once, at
+        the request's finish (`_mark_finished`).
+        """
+        logger.info(
+            "recompute stale remote KV: request %s was prefilled on "
+            "weight_version %r, this engine serves %r",
+            seq.id,
+            stamp,
+            self.weight_version,
+        )
+        self._uncount_inflight_load(seq)
+        if self.pd_admission is not None:
+            self.pd_admission.release(seq)
+        self.block_manager.deallocate(seq)
+        seq.num_cached_tokens = 0
+        seq.status = SequenceStatus.WAITING
 
     def _consume_failed_remote_kv(self, seq: Sequence) -> bool:
         if not self._pop_req_id(self.failed_recving_kv_req_ids, seq.id):
@@ -4091,16 +4128,20 @@ class Scheduler:
             self.running.insert(index, candidate)
         return False
 
-    def preempt_running(self) -> int:
+    def preempt_running(self, *, admit_parked: bool = False) -> int:
         """Preempt every running sequence ahead of a KV change; return how many.
 
         Each recomputes its prompt and tokens once scheduled again. Raises,
         preempting none, while one's blocks are still in use: remote KV loading
-        for a parked request, a KV connector holding the sequence, or its token
-        in flight through the pipeline. ``preempt()`` refuses nothing else, so
-        the loop does not stop part-way.
+        for a parked request (unless *admit_parked*), a KV connector holding the
+        sequence, or its token in flight through the pipeline. ``preempt()``
+        refuses nothing else, so the loop does not stop part-way.
+
+        *admit_parked* is for a P/D receiver's weight change: a parked request
+        keeps its blocks until its transfer resolves, and the handoff's version
+        stamp then decides whether it decodes or prefills here.
         """
-        if self._num_parked_remote_kv:
+        if self._num_parked_remote_kv and not admit_parked:
             raise RuntimeError(
                 f"cannot preempt while {self._num_parked_remote_kv} request(s) "
                 f"wait for remote KV"
@@ -4930,6 +4971,13 @@ class Scheduler:
             callback = getattr(self.kv_connector, "request_finished", None)
             if callable(callback):
                 callback(seq)
+            handoff = getattr(seq, "kv_transfer_params_output", None)
+            if (
+                self.stamps_handoffs
+                and handoff is not None
+                and self._connector_flag("is_producer")
+            ):
+                handoff["weight_version"] = self.weight_version
             if reason == "aborted":
                 self._connector_abort_send(seq)
         seq.num_tokens = num_tokens

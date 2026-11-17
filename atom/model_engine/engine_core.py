@@ -466,26 +466,37 @@ class EngineCore:
         what is running so it recomputes on what follows. When the weights
         change, the KV connector must also drop what it keeps for later
         requests. Raises with the reason, changing nothing that was running.
+
+        A P/D connector's weight change waits for no transfer and leaves parked
+        requests parked: the receiver tells KV computed on other weights by the
+        handoff's version stamp and prefills those requests itself
+        (`Scheduler._resolve_waiting_remote_kv`). An offload tier's transfers
+        are still waited for, since the KV it keeps is reused.
         """
-        if self.has_pending_kv_work():
+        scheduler = self.scheduler
+        connector = getattr(scheduler, "kv_connector", None)
+        pd_weight_change = (
+            weights
+            and connector is not None
+            and not getattr(connector, "is_offload", False)
+        )
+        if self.has_pending_kv_work() and not pd_weight_change:
             logger.info(
                 f"{self.label}: waiting up to "
                 f"{max(0.0, deadline - time.monotonic()):.0f}s for KV transfers "
                 f"in flight before the KV pool changes"
             )
-        while self.has_pending_kv_work():
-            if time.monotonic() >= deadline:
-                raise RuntimeError("KV transfers are still in flight")
-            self._next_idle_kv_drain = 0.0
-            self._advance_idle_kv_transfer(dispatch_new=False)
-            time.sleep(0.01)
-        scheduler = self.scheduler
+            while self.has_pending_kv_work():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("KV transfers are still in flight")
+                self._next_idle_kv_drain = 0.0
+                self._advance_idle_kv_transfer(dispatch_new=False)
+                time.sleep(0.01)
         if not scheduler.can_recompute_prompts and not scheduler.is_finished():
             raise RuntimeError(
                 f"{type(scheduler).__name__} cannot recompute the requests it "
                 f"has in flight"
             )
-        connector = getattr(scheduler, "kv_connector", None)
         if weights and connector is not None and not connector.drop_cached_kv():
             raise RuntimeError(
                 f"{type(connector).__name__} cannot drop KV computed with the "
@@ -494,7 +505,7 @@ class EngineCore:
         # One that cannot recompute is idle here, having been refused above;
         # a prefill scheduler has no preempt_running.
         if scheduler.can_recompute_prompts:
-            scheduler.preempt_running()
+            scheduler.preempt_running(admit_parked=pd_weight_change)
 
     def busy_loop(self):
         shutdown = False

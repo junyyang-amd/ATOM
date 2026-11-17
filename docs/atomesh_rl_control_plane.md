@@ -573,7 +573,11 @@ Differences, each with its reason:
 ATOM engine routes against SGLang's (D4): `pause_generation` accepts only
 `keep`, since ATOM cannot abort or retract a pause; an update always zeroes
 the KV pool and forgets cached prefixes whatever `flush_cache` says (goal 3);
-`/get_weight_version` and `/update_weight_version` are not served.
+`/get_weight_version` and `/update_weight_version` are not served. Under a P/D
+connector (D11, rule 5) an update answers 400 while generation is not paused
+or when it names the version the engine already serves, and
+`continue_generation` answers 400 after an update that named no version, until
+one that names a new version commits.
 
 ## What `atom/rollout` provides and what is added
 

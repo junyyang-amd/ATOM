@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import ClassVar
 
+from atom.kv_transfer.disaggregation.pd_producer import disaggregated_kv_role
 from atom.model_engine.collective_rpc import (
     COLLECTIVE_RPC_CMD,
     DISCARD_WEIGHT_SYNC_CMD,
@@ -173,6 +174,9 @@ class EngineUtilityHandler:
         # The weight version that complete update named, if any; the FINISH
         # that commits it makes it the scheduler's.
         self._awaiting_weight_version: str | None = None
+        # Under P/D, set while the weights changed after the last version was
+        # committed: no version names them, so the engine does not resume.
+        self._weights_unversioned = False
 
     def process_queue(self, utility_queue, engine):
         """Drain *utility_queue* and execute each command.
@@ -202,6 +206,8 @@ class EngineUtilityHandler:
                     self._refuse(cmd, args, refusal)
                     continue
                 if cmd in WEIGHT_UPDATE_UTILITY_CMDS:
+                    if self._pd_disaggregated() and args.get("weight_version") is None:
+                        self._weights_unversioned = True
                     # Local success is not global success: another DP engine
                     # can still fail this bucket. Stay fenced until CoreManager
                     # explicitly finishes a complete sync on every engine.
@@ -294,6 +300,7 @@ class EngineUtilityHandler:
                             self.scheduler.weight_version = (
                                 self._awaiting_weight_version
                             )
+                            self._weights_unversioned = False
                         engine._rl_weights_inconsistent = False
                         engine._weight_sync_fenced = False
                         engine._is_rl_weights_offloaded = False
@@ -319,12 +326,23 @@ class EngineUtilityHandler:
         preempts what is running, so nothing decodes on a zeroed or recomputed
         pool. A refused command preempts nothing and runs nothing.
         """
+        args = args if isinstance(args, dict) else {}
+        if cmd in WEIGHT_UPDATE_UTILITY_CMDS and self._pd_disaggregated():
+            # The handoff's version stamp is all that tells a P/D receiver KV
+            # computed on other weights from KV it can decode on.
+            if not engine._generation_paused:
+                return "a P/D engine updates its weights only while paused"
+            version = args.get("weight_version")
+            if version is not None and version == self.scheduler.weight_version:
+                return (
+                    f"a P/D engine already serves weight_version {version!r}; "
+                    f"an update must name a new one"
+                )
         starts_sync = cmd in WEIGHT_UPDATE_UTILITY_CMDS and not (
             self._continues_weight_sync(cmd, args)
         )
         if change is None and not starts_sync:
             return None
-        args = args if isinstance(args, dict) else {}
         deadline = time.monotonic() + min(
             _KV_QUIESCE_TIMEOUT_S, _remaining_timeout(args, _KV_QUIESCE_TIMEOUT_S)
         )
@@ -336,6 +354,12 @@ class EngineUtilityHandler:
         except RuntimeError as exc:
             return str(exc)
         return None
+
+    def _pd_disaggregated(self) -> bool:
+        """Whether this engine is a P/D producer or consumer."""
+        return (
+            disaggregated_kv_role(getattr(self.scheduler, "config", None)) is not None
+        )
 
     def _refuse(self, cmd: str, args, reason: str) -> dict:
         """Answer *cmd* with *reason* without running it."""
@@ -799,7 +823,21 @@ class EngineUtilityHandler:
         return reply
 
     def _handle_resume_generation(self, args: dict) -> dict:
-        """Let scheduling go on after ``pause_generation``."""
+        """Let scheduling go on after ``pause_generation``.
+
+        Refused while a P/D engine's weights carry no version: its handoffs
+        would be stamped with a version that names other weights.
+        """
+        if self._weights_unversioned:
+            reply = {
+                "cmd": RESUME_GENERATION_CMD,
+                "error": "refused: the weights changed without a new "
+                "weight_version; a P/D engine resumes only after an update "
+                "names one",
+            }
+            logger.error(f"{self.label}: resume_generation {reply['error']}")
+            self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
+            return reply
         self.engine.resume_generation()
         reply = {"cmd": RESUME_GENERATION_CMD}
         logger.info(f"{self.label}: generation resumed")
