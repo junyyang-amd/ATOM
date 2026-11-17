@@ -37,10 +37,13 @@ GPU_WORK = {"kernel", "gpu_memcpy", "gpu_memset"}
 def steps(events):
     """[(start, end, real batch size)] of the pure-decode steps."""
     windows = sorted(
-        (e["ts"], e["dur"], parse_label(e["name"]))
-        for e in events
-        if e.get("cat") == "gpu_user_annotation"
-        and parse_label(e["name"])["type"] in STEP_WINDOWS
+        (
+            (e["ts"], e["dur"], parse_label(e["name"]))
+            for e in events
+            if e.get("cat") == "gpu_user_annotation"
+            and parse_label(e["name"])["type"] in STEP_WINDOWS
+        ),
+        key=lambda w: w[:2],
     )
     kept = []  # a window repeated on another stream starts inside the first
     for w in windows:

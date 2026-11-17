@@ -70,7 +70,7 @@ def weighted(images):
     return out, total / every
 
 
-def a1_gaps(itl_json):
+def itl_gaps(itl_json):
     images = json.loads(itl_json.read_text())
     lines = []
     for key, what in (
@@ -80,9 +80,8 @@ def a1_gaps(itl_json):
         new, base = (
             statistics.mean(r[key] for r in images[i].values()) for i in (NEW, BASE)
         )
-        lines.append(
-            f"A1 gap, {what}: {new - base:+.3f} ms ({100 * (new - base) / base:+.1f}%)"
-        )
+        pct = 100 * (new - base) / base
+        lines.append(f"untraced ITL gap, {what}: {new - base:+.3f} ms ({pct:+.1f}%)")
     return lines
 
 
@@ -107,7 +106,7 @@ def report(case, summaries, itl_json):
         f"traced gap: {gap / 1000:+.3f} ms ({100 * gap / rows[BASE]['step']:+.1f}%)"
     )
     if itl_json.exists():
-        lines += a1_gaps(itl_json)
+        lines += itl_gaps(itl_json)
     other = sum(rows[NEW][r] - rows[BASE][r] for r in (UNMATCHED, "idle"))
     share = f"{100 * (gap - other) / gap:.0f}%" if gap else "n/a, the gap is 0"
     lines.append(f"explained share: {share}")

@@ -23,6 +23,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts" / "kimi_k3_tpot"
 sys.path.insert(0, str(SCRIPTS))
 import breakdown
 import itl
+import summarize
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "kimi_k3_tpot"
 
@@ -206,6 +207,13 @@ def test_summary_steps_by_real_batch_size_with_overlap_shared(summary):
         assert sum(s["kernels"].values()) + s["idle_us"] == s["step_us"]
 
 
+def test_steps_keep_the_first_of_two_windows_with_equal_start_and_duration():
+    windows = [(0, 80, label(4)), (0, 80, label(2, prefill=True))]
+    windows += [(100, 80, label(3)), (200, 50, label(4))]
+    events = [event("gpu_user_annotation", n, ts, d) for ts, d, n in windows]
+    assert summarize.steps(events) == [(0, 100, 4), (100, 200, 3)]
+
+
 def test_breakdown_of_one_summary_as_both_images(summary):
     figures = json.loads(summary.read_text())
     figures["image"] = itl.BASE
@@ -225,7 +233,7 @@ def test_breakdown_of_one_summary_as_both_images(summary):
     assert "case-x: 100.0% of steps" in printed
     assert "traced gap: +0.000 ms" in printed
     assert "explained share: n/a" in printed
-    assert "A1 gap" not in printed
+    assert "untraced ITL gap" not in printed
 
 
 def runs(*batch_sizes):
@@ -278,8 +286,8 @@ def test_breakdown_weights_both_images_by_their_pooled_batch_sizes(tmp_path, out
     assert rows["step"] == ["0.150", "0.140", "+0.010"]
     assert "c: 61.5% of steps at batch sizes every image has" in printed
     assert "traced gap: +0.010 ms (+7.1%)" in printed
-    assert "A1 gap, whole hour: +0.277 ms (+1.9%)" in printed
-    assert "A1 gap, 900-930 s: +0.587 ms (+4.2%)" in printed
+    assert "untraced ITL gap, whole hour: +0.277 ms (+1.9%)" in printed
+    assert "untraced ITL gap, 900-930 s: +0.587 ms (+4.2%)" in printed
     assert "explained share: 50%" in printed
 
 
