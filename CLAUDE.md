@@ -193,3 +193,5 @@ Key entry points:
 | MiniMax-H3 (video+audio diffusion) | `recipes/MiniMax-H3.md` |
 | DeepSeek-V4.1-Flash | `recipes/DeepSeek-V4.1-Flash.md` |
 | Qwen3.8-Flash-Next mono decode | `recipes/Qwen3.8-Flash-Next-Mono-Program.md` |
+| ATOMesh RL control plane (pause / refit / resume) | `docs/atomesh_rl_control_plane.md` |
+| Design principles (RL line) | `docs/agent_team_principles.md` |
