@@ -13,6 +13,12 @@ use thiserror::Error;
 pub enum RlError {
     #[error("invalid engine path: {0}")]
     InvalidEnginePath(String),
+    #[error("a non-empty `selector` query parameter is required")]
+    SelectorRequired,
+    #[error("invalid selector at byte {offset}: {message}")]
+    InvalidSelector { offset: usize, message: String },
+    #[error("no workers match selector `{0}`")]
+    NoWorkersMatch(String),
     #[error("worker `{0}` not found")]
     WorkerNotFound(String),
     #[error(
@@ -43,6 +49,9 @@ impl RlError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidEnginePath(_) => "invalid_engine_path",
+            Self::SelectorRequired => "selector_required",
+            Self::InvalidSelector { .. } => "invalid_selector",
+            Self::NoWorkersMatch(_) => "no_workers_match",
             Self::WorkerNotFound(_) => "worker_not_found",
             Self::NoControlEndpoint { .. } => "no_control_endpoint",
             Self::UpstreamUnreachable { .. } => "upstream_unreachable",
@@ -52,7 +61,10 @@ impl RlError {
 
     pub fn status(&self) -> StatusCode {
         match self {
-            Self::InvalidEnginePath(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidEnginePath(_)
+            | Self::SelectorRequired
+            | Self::InvalidSelector { .. }
+            | Self::NoWorkersMatch(_) => StatusCode::BAD_REQUEST,
             Self::WorkerNotFound(_) => StatusCode::NOT_FOUND,
             Self::NoControlEndpoint { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::UpstreamUnreachable { .. } => StatusCode::BAD_GATEWAY,
@@ -64,7 +76,9 @@ impl RlError {
     pub fn to_json(&self) -> Value {
         let mut body = json!({ "error": self.code(), "message": self.to_string() });
         match self {
-            Self::InvalidEnginePath(_) => {}
+            Self::InvalidEnginePath(_) | Self::SelectorRequired => {}
+            Self::InvalidSelector { offset, .. } => body["offset"] = json!(offset),
+            Self::NoWorkersMatch(selector) => body["selector"] = json!(selector),
             Self::WorkerNotFound(id) => body["id"] = json!(id),
             Self::NoControlEndpoint {
                 worker_id,
