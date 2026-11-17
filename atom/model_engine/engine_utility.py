@@ -148,6 +148,7 @@ class EngineUtilityHandler:
         COLLECTIVE_RPC_CMD: "_handle_collective_rpc",
         PAUSE_GENERATION_CMD: "_handle_pause_generation",
         RESUME_GENERATION_CMD: "_handle_resume_generation",
+        "get_weight_version": "_handle_get_weight_version",
     }
 
     def __init__(
@@ -169,6 +170,9 @@ class EngineUtilityHandler:
         # Request id of the complete update this engine applied, the only one
         # a FINISH may commit.
         self._awaiting_finish: str | None = None
+        # The weight version that complete update named, if any; the FINISH
+        # that commits it makes it the scheduler's.
+        self._awaiting_weight_version: str | None = None
 
     def process_queue(self, utility_queue, engine):
         """Drain *utility_queue* and execute each command.
@@ -254,6 +258,7 @@ class EngineUtilityHandler:
                         )
                     elif completes_weight_sync(cmd, args):
                         self._awaiting_finish = args.get("request_id")
+                        self._awaiting_weight_version = args.get("weight_version")
                 elif cmd == DISCARD_WEIGHT_SYNC_CMD and not self._weight_sync_fenced:
                     # No update of it ran here (the fence goes up with the
                     # first), so this engine still holds the committed weights.
@@ -285,6 +290,10 @@ class EngineUtilityHandler:
                         self._weight_sync_in_progress = False
                         self._weight_sync_failure = None
                         self._awaiting_finish = None
+                        if self._awaiting_weight_version is not None:
+                            self.scheduler.weight_version = (
+                                self._awaiting_weight_version
+                            )
                         engine._rl_weights_inconsistent = False
                         engine._weight_sync_fenced = False
                         engine._is_rl_weights_offloaded = False
@@ -794,6 +803,15 @@ class EngineUtilityHandler:
         self.engine.resume_generation()
         reply = {"cmd": RESUME_GENERATION_CMD}
         logger.info(f"{self.label}: generation resumed")
+        self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
+        return reply
+
+    def _handle_get_weight_version(self, args: dict) -> dict:
+        """The version of the weights this engine serves."""
+        reply = {
+            "cmd": "get_weight_version",
+            "result": self.scheduler.weight_version,
+        }
         self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
         return reply
 

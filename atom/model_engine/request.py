@@ -16,3 +16,6 @@ class RequestOutput:
     kv_transfer_params_output: dict[str, Any] | None = None
     num_cached_tokens: int = 0
     logprobs: list[Any] | None = None
+    # The engine's weight version when this output was built; None from a
+    # path that never reached a scheduler (a rejection).
+    weight_version: str | None = None

@@ -737,6 +737,9 @@ class Scheduler:
         self.config = config
         # tokens a replaying forward carries from before it (`Replay.history_ids`)
         self.replay_history_tokens = getattr(config, "replay_history_tokens", 0)
+        # The version of the weights this engine serves; a committed weight
+        # update that names one replaces it (`EngineUtilityHandler`).
+        self.weight_version = getattr(config, "weight_version", "default")
         pc = getattr(config, "parallel_config", None)
         self.metrics = SchedulerMetrics(
             getattr(pc, "data_parallel_rank", 0)
@@ -4814,6 +4817,8 @@ class Scheduler:
                 finished_seqs.append(seq)
 
         if stream_output_queue is not None and stream_outputs:
+            for _, request_output in stream_outputs:
+                request_output.weight_version = self.weight_version
             stream_output_queue.put_nowait(stream_outputs)
 
         if need_placeholder:
@@ -5453,6 +5458,7 @@ class PrefillScheduler:
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.block_manager = None  # blocks managed by decode process
+        self.weight_version = getattr(config, "weight_version", "default")
         pc = getattr(config, "parallel_config", None)
         self.metrics = SchedulerMetrics(
             getattr(pc, "data_parallel_rank", 0)

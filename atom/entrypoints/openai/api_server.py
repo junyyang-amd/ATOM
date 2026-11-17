@@ -39,6 +39,7 @@ from fastapi.exception_handlers import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field, NonNegativeInt
 from transformers import AutoProcessor, AutoTokenizer
 
 from atom import SamplingParams
@@ -112,6 +113,7 @@ from .protocol import (
     ModelCard,
     ModelList,
     ended_by_stop,
+    openai_stop_reason,
     validate_max_tokens,
 )
 from .reasoning import (
@@ -923,12 +925,16 @@ async def generate_async(
     seq = None
     kv_transfer_output_meta_info = None
     num_cached_tokens_seen = 0
+    weight_version = None
 
     def completion_callback(request_output: RequestOutput):
-        nonlocal kv_transfer_output_meta_info, num_cached_tokens_seen
+        nonlocal kv_transfer_output_meta_info, num_cached_tokens_seen, weight_version
         kv_transfer_output_meta_info = getattr(
             request_output, "kv_transfer_params_output", None
         )
+        # The last output's: a request preempted by a refit finishes on the
+        # weights it was resumed on.
+        weight_version = getattr(request_output, "weight_version", None)
         _ct = getattr(request_output, "num_cached_tokens", 0)
         if _ct:
             num_cached_tokens_seen = _ct
@@ -1028,6 +1034,7 @@ async def generate_async(
         "tpot": tpot,
         "latency": latency,
         "num_cached_tokens": num_cached_tokens_seen,
+        "weight_version": weight_version,
     }
     if kv_transfer_output_meta_info is not None:
         response["kv_transfer_output_meta_info"] = kv_transfer_output_meta_info
@@ -3706,11 +3713,116 @@ _RL_ROUTES = {
 
 
 def register_rl_routes(args) -> None:
-    """Serve ``_RL_ROUTES`` when the server runs with ``--enable-rl``."""
+    """Serve ``_RL_ROUTES``, ``/model_info`` and ``/generate`` when the server
+    runs with ``--enable-rl``."""
     if not args.enable_rl:
         return
     for path, (cmd, fields) in _RL_ROUTES.items():
         _engine_route(path, methods=["POST"], name=cmd)(_rl_route(cmd, fields))
+    _engine_route("/model_info", name="model_info")(_rl_model_info)
+    app.post("/generate")(_rl_generate)
+
+
+async def _rl_model_info() -> JSONResponse:
+    """The served model and the version of its weights, as SGLang answers.
+
+    Every DP engine commits an update in the same FINISH, so DP rank 0's
+    version is every engine's once the update has returned.
+    """
+    replies = await asyncio.to_thread(
+        engine.core_mgr.broadcast_utility_command_sync, "get_weight_version"
+    )
+    return JSONResponse(
+        {
+            "model_path": _get_engine_config().model,
+            "weight_version": replies[0]["result"],
+        }
+    )
+
+
+class _GenerateSamplingParams(BaseModel):
+    """The SGLang sampling parameters ``/generate`` takes, with SGLang's
+    defaults."""
+
+    max_new_tokens: int = 128
+    temperature: float = DEFAULT_TEMPERATURE
+    top_p: float = DEFAULT_TOP_P
+    top_k: int = DEFAULT_TOP_K
+    stop: str | list[str] | None = None
+    ignore_eos: bool = False
+
+
+class _GenerateRequest(BaseModel):
+    """SGLang's ``/generate`` body, as far as ATOM serves it."""
+
+    text: str | None = None
+    input_ids: list[NonNegativeInt] | None = None
+    sampling_params: _GenerateSamplingParams = Field(
+        default_factory=_GenerateSamplingParams
+    )
+    stream: bool = False
+
+
+async def _rl_generate(request: _GenerateRequest, raw_request: Request):
+    """SGLang's non-streaming ``/generate``, run on the completion path."""
+    if request.stream:
+        raise HTTPException(status_code=400, detail="/generate does not stream")
+    if bool(request.text) == bool(request.input_ids):
+        raise HTTPException(
+            status_code=400, detail="give one of text and input_ids, not empty"
+        )
+    params = request.sampling_params
+    request_id = f"generate-{uuid.uuid4().hex}"
+    set_request_id(request_id)
+    try:
+        sampling_params = _build_sampling_params(
+            temperature=params.temperature,
+            max_tokens=validate_max_tokens(params.max_new_tokens),
+            stop_strings=[params.stop] if isinstance(params.stop, str) else params.stop,
+            ignore_eos=params.ignore_eos,
+            top_k=params.top_k,
+            top_p=params.top_p,
+        )
+        output = await _run_nonstream_with_disconnect(
+            generate_async(
+                request.text or request.input_ids, sampling_params, request_id
+            ),
+            raw_request,
+            request_id,
+        )
+    except _ClientDisconnected:
+        return JSONResponse(status_code=499, content={"detail": "client disconnected"})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if output is None:
+        raise RuntimeError("No output generated")
+    return JSONResponse(
+        {
+            "text": output["text"],
+            "output_ids": list(output["token_ids"]),
+            "meta_info": {
+                "id": request_id,
+                "finish_reason": _sglang_finish_reason(
+                    output["finish_reason"], output["num_tokens_output"]
+                ),
+                "prompt_tokens": output["num_tokens_input"],
+                "completion_tokens": output["num_tokens_output"],
+                "cached_tokens": output["num_cached_tokens"],
+                "weight_version": output["weight_version"],
+            },
+        }
+    )
+
+
+def _sglang_finish_reason(reason: str | None, completion_tokens: int) -> dict | None:
+    """The engine's leave reason as SGLang's ``meta_info.finish_reason``."""
+    if reason is None:
+        return None
+    if ended_by_stop(reason):
+        return {"type": "stop"}
+    if openai_stop_reason(reason) == "length":
+        return {"type": "length", "length": completion_tokens}
+    return {"type": reason}
 
 
 def _rl_route(cmd: str, fields: tuple[str, ...]):

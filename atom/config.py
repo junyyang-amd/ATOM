@@ -2346,6 +2346,8 @@ class Config:
     runner_qualname: str = "atom.model_engine.model_runner.ModelRunner"
     # Serve the RL control routes (pause, refit, resume) on the RLHF runner.
     enable_rl: bool = False
+    # The version of the loaded weights; a committed update may name another.
+    weight_version: str = "default"
     # EPLB master switch + sub-config
     eplb_enable: bool = False
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
