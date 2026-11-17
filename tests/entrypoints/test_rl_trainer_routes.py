@@ -127,6 +127,7 @@ def test_a_refused_update_answers_400_and_logs_the_broadcast_unreceived(
     assert reason in reply.json()["message"]
     assert "'refit' has no receiver" in caplog.text
     assert sched.weight_version != "v2"
+    assert not engine._weight_sync_fenced, "nothing was written"
 
 
 def test_without_enable_rl_the_routes_do_not_exist(serve):
