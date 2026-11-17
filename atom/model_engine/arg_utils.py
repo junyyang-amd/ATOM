@@ -180,6 +180,7 @@ class EngineArgs:
     spec_decode_acceptance_length: float | None = None
     mark_trace: bool = False
     enable_rl: bool = False
+    weight_version: str = "default"
     enable_rapidserve: bool = False
     disagg_prefill_max_num_seqs: int | None = None
     disagg_constrained: bool = False
@@ -749,6 +750,13 @@ class EngineArgs:
             help="Serve the RL rollout routes (pause_generation, "
             "continue_generation, flush_cache, update_weights_from_disk) and "
             "run the RLHF model runner, which can update weights in place.",
+        )
+        parser.add_argument(
+            "--weight-version",
+            type=str,
+            default=EngineArgs.weight_version,
+            help="The version of the weights the server starts with, reported "
+            "by /model_info and /generate until an update names another.",
         )
         parser.add_argument(
             "--enable-rapidserve",
