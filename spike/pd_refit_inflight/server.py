@@ -12,15 +12,13 @@ import glob
 import os
 import time
 
-import atom.model_engine.arg_utils as arg_utils
+from atom.model_engine import arg_utils
 from atom.rollout.async_engine import AsyncLLMEngine
 
 # AsyncLLMEngine is LLMEngine with the RLHF runner, which carries the weight sync.
 arg_utils.LLMEngine = AsyncLLMEngine
 
-from fastapi import Body  # noqa: E402
-
-from atom.entrypoints.openai import api_server as srv  # noqa: E402
+from atom.entrypoints.openai import api_server as srv
 
 STATE_KEYS = (
     "role",
@@ -59,7 +57,7 @@ def spike_pause():
 
 
 @srv.app.post("/spike/update")
-def spike_update(body: dict = Body(...)):
+def spike_update(body: dict):
     return _timed(
         lambda: srv.engine.load_weights(
             _checkpoint(body["path"]), bucket_size_mb=8192, mode="shm"

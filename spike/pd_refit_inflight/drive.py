@@ -1,13 +1,13 @@
 """One refit run against a live 1P1D pair, its fresh-pair reference, and the table.
 
-  drive.py run --order p|d|both --new <ckpt> --out run.json
-      64 streamed greedy completions (max_tokens 256, ignore_eos) through the
-      router; once --pause-after have their first token, pause P and D, update both to
-      <ckpt>, resume, in that order ("both": each step on the two at once).
-  drive.py reference run*.json --out ref.json
-      against a fresh pair on <ckpt>: per completed request, the greedy
-      continuation of its prompt plus the text it had before the resume.
-  drive.py table ref.json run*.json
+drive.py run --order p|d|both --new <ckpt> --out run.json
+    64 streamed greedy completions (max_tokens 256, ignore_eos) through the
+    router; once --pause-after have their first token, pause P and D, update both to
+    <ckpt>, resume, in that order ("both": each step on the two at once).
+drive.py reference run*.json --out ref.json
+    against a fresh pair on <ckpt>: per completed request, the greedy
+    continuation of its prompt plus the text it had before the resume.
+drive.py table ref.json run*.json
 """
 
 import argparse
@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import requests
 
@@ -28,7 +29,8 @@ N, MAX_TOKENS, HANG_S = 64, 256, 180
 def prompts() -> list[str]:
     """64 fixed prompts of 200 to 3000 words, so prefills overlap decodes."""
     rng = random.Random(92)
-    words = "the of and river stone light market winter engine garden letter".split()
+    words = ["the", "of", "and", "river", "stone", "light", "market", "winter"]
+    words += ["engine", "garden", "letter"]
     return [
         f"Story {i}: " + " ".join(rng.choices(words, k=rng.randint(200, 3000)))
         for i in range(N)
@@ -124,7 +126,9 @@ def cmd_run(args):
     pause = step("pause", args.order)
     at_pause = [state_of(s) for s in streams]
     time.sleep(0.5)  # two metric pushes
-    engines = {side: requests.get(f"{u}/spike/state").json() for side, u in SIDES.items()}
+    engines = {
+        side: requests.get(f"{u}/spike/state").json() for side, u in SIDES.items()
+    }
     update = step("update", args.order, path=args.new)
     time.sleep(1.0)  # chunks already sent before the pause drain to the client
     resumed.set()
@@ -144,9 +148,9 @@ def cmd_run(args):
         }
         for s, st in zip(streams, at_pause)
     ]
-    out = dict(order=args.order, pause=pause, engines=engines, update=update)
-    out.update(resume=resume, requests=reqs)
-    json.dump(out, open(args.out, "w"), indent=1)
+    out = {"order": args.order, "pause": pause, "engines": engines}
+    out |= {"update": update, "resume": resume, "requests": reqs}
+    Path(args.out).write_text(json.dumps(out, indent=1))
     print(summary_line(out, None))
 
 
@@ -154,7 +158,7 @@ def cmd_reference(args):
     model, ps = model_id(), prompts()
     jobs = {}
     for path in args.runs:
-        for r in json.load(open(path))["requests"]:
+        for r in json.loads(Path(path).read_text())["requests"]:
             if r["outcome"] == "completed" and r["at_pause"] != "done":
                 jobs[(r["idx"], r["pre"])] = None
 
@@ -174,7 +178,7 @@ def cmd_reference(args):
     with ThreadPoolExecutor(32) as pool:
         texts = list(pool.map(ask, list(jobs)))
     ref = [{"idx": k[0], "pre": k[1], "text": t} for k, t in zip(jobs, texts)]
-    json.dump(ref, open(args.out, "w"), indent=1)
+    Path(args.out).write_text(json.dumps(ref, indent=1))
     print(f"{len(ref)} reference continuations")
 
 
@@ -207,9 +211,12 @@ def summary_line(run, ref) -> str:
 def cmd_table(args):
     ref = None
     if args.ref != "-":
-        ref = {(r["idx"], r["pre"]): r["text"] for r in json.load(open(args.ref))}
+        ref = {
+            (r["idx"], r["pre"]): r["text"]
+            for r in json.loads(Path(args.ref).read_text())
+        }
     for path in args.runs:
-        run = json.load(open(path))
+        run = json.loads(Path(path).read_text())
         print(path.rsplit("/", 1)[-1], summary_line(run, ref))
         for side, a in run["update"].items():
             if not a["ok"]:
