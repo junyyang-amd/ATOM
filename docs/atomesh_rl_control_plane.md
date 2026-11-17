@@ -553,7 +553,7 @@ Adopted unchanged (D1, D2):
   total, succeeded}` with `RlFailedCall {worker_id, url, error, message,
   status, connection_mode}`; 200 when nothing failed, else 207
   (`crates/protocols/src/rl.rs`).
-- Errors `{error, message, ...}`: `invalid_engine_path`, `invalid_body`,
+- Errors `{error, message, ...}`: `invalid_engine_path`,
   `selector_required`, `invalid_selector` (`offset`), `no_workers_match`
   (`selector`) at 400; `worker_not_found` 404; `no_control_endpoint` 422;
   `upstream_unreachable` 502; `upstream_timeout` 504 (`error.rs: RlError`).
@@ -567,7 +567,7 @@ Differences, each with its reason:
 | Routes nested under `apply_control_plane_auth` | No auth layer | ATOMesh has none; its admin routes run without one. |
 | `engine` from the worker's `RuntimeType` | From `--backend` for HTTP workers (D3) | ATOMesh's HTTP workers carry no runtime type. |
 | Capability rows for SGLang, vLLM, TokenSpeed | Adds an `atom` row (D3) | ATOM is a new engine. |
-| gRPC / ZMQ workers via `rl.control_url`, `RlControlCalls` | HTTP workers only; others answer `no_control_endpoint` | gRPC workers are a non-goal. |
+| gRPC / ZMQ workers via `rl.control_url`, `RlControlCalls`; `invalid_body` 400 when such a call's body is not a JSON object (`proxy.rs: call_over_engine_connection`) | HTTP workers only; others answer `no_control_endpoint`, so `invalid_body` is never answered | gRPC workers are a non-goal; the HTTP path forwards the body verbatim and never parses it. |
 | `smg_rl_*` metrics | None | No acceptance item reads them. |
 
 ATOM engine routes against SGLang's (D4): `pause_generation` accepts only
