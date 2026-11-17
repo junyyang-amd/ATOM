@@ -148,6 +148,7 @@ Key entry points:
 | Dynamic chunked pipeline parallel | `docs/dynamic_chunking_guide.md` |
 | Metrics & observability | `docs/metrics_guide.md` |
 | Kimi-K3 decode TPOT on ROCm 10.1 (design) | `docs/kimi_k3_rocm10_tpot.md` |
+| Kimi-K3 decode TPOT on ROCm 10.1 (results) | `docs/kimi_k3_rocm10_tpot_report.md` |
 | Design principles (kimi-k3-tpot line) | `docs/agent_team_principles.md` |
 | CI/PR workflow | `/ci-pr-guide` |
 | Performance benchmark | `/benchmark-guide` |

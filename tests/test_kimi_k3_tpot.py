@@ -9,6 +9,7 @@ breakdown.py run on synthetic kineto traces, times in us.
 
 import gzip
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -299,3 +300,128 @@ def test_kernels_take_their_first_matching_component():
     assert breakdown.component("aiter::f4gemm_bf16_per1x32Fp4") == "GEMM"
     assert breakdown.component("_replayssm_kda_fwd_kernel") == "KDA"
     assert breakdown.component("_attn_res_fused_kernel") == breakdown.UNMATCHED
+
+
+REPO = SCRIPTS.parents[1]
+CI_JOB = REPO / ".github" / "scripts" / "atomesh" / "pd_slurm_job.sh"
+STUBS = {
+    # Records each container start; answers image inspect with a fixed ID.
+    "docker": """#!/bin/sh
+case "$1" in
+  image) echo sha256:0123456789abcdef0123 ;;
+  run) [ "$2" = --name ] && printf '%s\\0' "$@" > "$DOCKER_RUN_ARGS/$3" ;;
+esac
+exit 0
+""",
+    "ip": "#!/bin/sh\necho '1: lo    inet 127.0.0.1/8 scope host lo'\n",
+}
+
+
+def bash_words(line):
+    """The words bash reads from a line of printf %q output."""
+    return subprocess.run(
+        ["bash", "-c", 'eval "words=($1)"; printf "%s\\0" "${words[@]}"', "-", line],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split("\0")[:-1]
+
+
+def ci_docker_run(tmp_path, env, case, rank, run_dir, job_id):
+    """The docker run arguments pd_slurm_job.sh: run_container_rank uses."""
+    functions = "".join(
+        subprocess.run(
+            ["sed", "-n", f"/^{name}() {{/,/^}}/p", CI_JOB],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        for name in (
+            "bounded_docker_rm",
+            "prepare_flydsl_aot_cache",
+            "run_container_rank",
+        )
+    )
+    script = f"""set -euo pipefail
+{functions}
+REPO_ROOT={REPO} RUN_DIR={run_dir} JOB_ID={job_id}
+ATOMESH_CELL_ID={case["ATOMESH_CELL_ID"]} DOCKER_IMAGE=rocm/atom-dev:nightly_202611021458
+IPS=(127.0.0.1 127.0.0.1) NODE0_ADDR=127.0.0.1 IPADDRS=127.0.0.1,127.0.0.1
+CURRENT_USER="$(id -un 2>/dev/null || id -u)"
+NCCL_IB_GID_INDEX={case["NCCL_IB_GID_INDEX"]}
+PREFILL_WORKERS={case["PREFILL_WORKERS"]} DECODE_WORKERS={case["DECODE_WORKERS"]}
+PREFILL_TP={case["PREFILL_TP"]} DECODE_TP={case["DECODE_TP"]}
+export ATOMESH_BUILD_MESH={case["ATOMESH_BUILD_MESH"]}
+run_container_rank {rank} {run_dir}/docker.env
+"""
+    subprocess.run(["bash", "-c", script], check=True, env=env, capture_output=True)
+    (recorded,) = (tmp_path / "docker-run").glob(f"atomesh-*-{rank}")
+    return recorded.read_text().split("\0")[:-1]
+
+
+def test_dry_run_starts_each_rank_as_the_ci_does(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "docker-run").mkdir()
+    for name, text in STUBS.items():
+        (bin_dir / name).write_text(text)
+        (bin_dir / name).chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "TMPDIR": str(tmp_path),
+        "DOCKER_RUN_ARGS": str(tmp_path / "docker-run"),
+        "PD_AB_PREFILL_HOST": "localhost",
+        "PD_AB_DECODE_HOST": "localhost",
+    }
+    for name in ("NCCL_SOCKET_IFNAME", "MORI_SOCKET_IFNAME", "ATOMESH_MESH_BINARY"):
+        env.pop(name, None)
+    case = dict(
+        line.split("=", 1)
+        for line in (SCRIPTS / "cases" / "dspark4-c48.env").read_text().splitlines()
+    )
+    out = tmp_path / "out"
+    printed = subprocess.run(
+        [
+            "bash",
+            SCRIPTS / "pd_ab.sh",
+            "--dry-run",
+            "--issue",
+            "83",
+            "dspark4-c48",
+            out,
+        ],
+        check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert not out.exists()
+    assert "DOCKER_IMAGE=rocm/atom-dev:ROCm_10.1.0" in printed
+    dry = [
+        bash_words(line)[1:]
+        for line in printed.splitlines()
+        if line.startswith("docker run ")
+    ]
+    assert len(dry) == 4
+
+    # What run_container_rank finds already in place: the FlyDSL AOT cache
+    # extracted for this image and the router built for this run.
+    uid = os.getuid()
+    aot = tmp_path / f"atomesh-flydsl-aot-{uid}" / "0123456789abcdef"
+    aot.mkdir(parents=True)
+    (aot / ".complete").touch()
+    job_id = "kimi-tpot-83-nightly_202611021458-r1"
+    run_dir = out / "nightly_202611021458-r1"
+    (run_dir / "mesh-build").mkdir(parents=True)
+    (run_dir / "mesh-build" / "atomesh").touch(mode=0o755)
+    (run_dir / "mesh-build" / "mesh-build.json").touch()
+    for rank, role in enumerate(("prefill", "decode")):
+        ci = ci_docker_run(tmp_path, env, case, rank, run_dir, job_id)
+        ours = dry[rank]
+        # The one deviation in the arguments: the container name.
+        name = ci.index("--name") + 1
+        assert ci[name] == f"atomesh-{case['ATOMESH_CELL_ID']}-{job_id}-{rank}"
+        assert ours[name] == f"kimi-tpot-83-{role}"
+        ci[name] = ours[name]
+        assert ours == ci
