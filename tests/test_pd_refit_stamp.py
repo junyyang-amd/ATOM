@@ -11,9 +11,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import test_pd_admission
 from conftest import MockConfig
 from test_kv_change import _engine, _run, _running, _wired
-from test_pd_admission import build, mooncake_module, receive_success  # noqa: F401
+from test_pd_admission import receive_success
 
 from atom.model_engine.engine_utility import (
     PAUSE_GENERATION_CMD,
@@ -24,6 +25,10 @@ from atom.model_engine.sequence import SequenceStatus
 from atom.sampling_params import SamplingParams
 
 UPDATE = "update_weights_from_disk"
+
+# A Mooncake P/D consumer scheduler, as the admission tests build it.
+build = test_pd_admission.build
+mooncake_module = test_pd_admission.mooncake_module
 
 
 def _stamped(request, stamp):
@@ -141,7 +146,7 @@ def test_a_stale_stamp_waits_for_its_transfer_to_finish(build):
 
 @pytest.mark.parametrize("enable_rl", [True, False])
 def test_p_stamps_its_handoff_only_with_enable_rl(
-    monkeypatch, mooncake_module, seq_factory, enable_rl  # noqa: F811
+    monkeypatch, mooncake_module, seq_factory, enable_rl
 ):
     config = MockConfig(
         num_kvcache_blocks=64,
