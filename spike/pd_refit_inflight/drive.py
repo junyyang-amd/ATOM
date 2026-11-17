@@ -24,7 +24,7 @@ import requests
 
 ROUTER = "http://127.0.0.1:18100"
 SIDES = {"p": "http://127.0.0.1:18110", "d": "http://127.0.0.1:18120"}
-N, MAX_TOKENS, HANG_S = 64, 256, 180
+N, MAX_TOKENS, HANG_S, AGREE = 64, 256, 180, 64
 
 
 def prompts() -> list[str]:
@@ -183,19 +183,26 @@ def cmd_reference(args):
     print(f"{len(ref)} reference continuations")
 
 
+def agrees(text: str, ref: str) -> bool:
+    """Whether *text* starts as *ref* does. Only the first AGREE characters
+    count: two greedy runs on the same weights can part later on batch
+    numerics, while Qwen3-1.7B and its Base part within a few tokens."""
+    n = min(AGREE, len(text))
+    return text[:n] == ref[:n]
+
+
 def weights_seen(r, refs) -> str | None:
     """Which fresh pair's greedy continuation the text after the resume is:
     "new", "old", "both" or "neither"; None for a request with none."""
     if r["outcome"] != "completed" or refs is None:
         return None
-    if r["at_pause"] == "done":  # all of it before the pause: the old pair's
-        text = refs["old"].get((r["idx"], ""))
-        return None if text is None else "old" if text == r["pre"] else "neither"
-    if not r["post"]:
+    if r["at_pause"] == "done":  # all of it before the pause
+        key, text = (r["idx"], ""), r["pre"]
+    else:
+        key, text = (r["idx"], r["pre"]), r["post"]
+    if not text:
         return None
-    hits = [
-        k for k, ref in refs.items() if ref[(r["idx"], r["pre"])].startswith(r["post"])
-    ]
+    hits = [side for side, ref in refs.items() if agrees(text, ref[key])]
     return {0: "neither", 2: "both"}.get(len(hits)) or hits[0]
 
 
