@@ -31,6 +31,7 @@ WEIGHT_UPDATE_UTILITY_CMDS = frozenset(
         "update_weights_shm",
         "update_weights_ipc",
         "update_weights_from_disk",
+        "update_weights_from_distributed",
     }
 )
 # As vLLM's pause_generation(mode="keep") / resume_generation.
@@ -132,6 +133,9 @@ class EngineUtilityHandler:
         "update_weights_shm": "_handle_update_weights_shm",
         "update_weights_ipc": "_handle_update_weights_ipc",
         "update_weights_from_disk": "_handle_update_weights_from_disk",
+        "update_weights_from_distributed": "_handle_update_weights_from_distributed",
+        "init_weights_update_group": "_handle_init_weights_update_group",
+        "destroy_weights_update_group": "_handle_destroy_weights_update_group",
         DISCARD_WEIGHT_SYNC_CMD: "_handle_discard_failed_weight_sync",
         FINISH_WEIGHT_SYNC_CMD: "_handle_finish_weight_sync",
         "get_weight_sync_status": "_handle_get_weight_sync_status",
@@ -727,6 +731,53 @@ class EngineUtilityHandler:
             "update_weights_from_disk",
             args,
             args.get("model_path"),
+        )
+        self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
+        return reply
+
+    def _handle_update_weights_from_distributed(self, args: dict) -> dict:
+        """Receive the named tensors from the trainer's group on every TP rank."""
+        reply = self._update_on_every_rank(
+            "update_weights_from_distributed",
+            "update_weights_from_distributed",
+            args,
+            args.get("names", []),
+            args.get("dtypes", []),
+            args.get("shapes", []),
+            args.get("group_name"),
+        )
+        self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
+        return reply
+
+    def _handle_init_weights_update_group(self, args: dict) -> dict:
+        """Every TP rank joins the trainer's group as ``rank_offset`` + its rank.
+
+        Each rank waits in the rendezvous until the trainer and every other
+        rank have joined, so the group and this call share one deadline.
+        """
+        timeout = _remaining_timeout(args, 300.0)
+        reply = self._utility_on_every_rank(
+            "init_weights_update_group",
+            "init_weights_update_group",
+            args.get("master_address"),
+            args.get("master_port"),
+            args.get("rank_offset"),
+            args.get("world_size"),
+            args.get("group_name"),
+            args.get("backend", "nccl"),
+            timeout,
+            timeout=timeout,
+        )
+        self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
+        return reply
+
+    def _handle_destroy_weights_update_group(self, args: dict) -> dict:
+        """Every TP rank leaves the trainer's group."""
+        reply = self._utility_on_every_rank(
+            "destroy_weights_update_group",
+            "destroy_weights_update_group",
+            args.get("group_name"),
+            timeout=_remaining_timeout(args, 300.0),
         )
         self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
         return reply
