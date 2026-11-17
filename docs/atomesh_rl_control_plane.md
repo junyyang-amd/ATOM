@@ -17,7 +17,7 @@ relative to `atom/mesh/`; SMG paths to the SMG checkout.
 
 Every RL control call goes client -> ATOMesh -> engine; the client never
 connects to a worker (goal 1). ATOMesh is launched with the long-rollout
-profile in every scenario (Decision D13).
+profile in every scenario (Decision D12).
 
 ### A1: mesh routes on SGLang
 
@@ -162,7 +162,10 @@ exit 0 -> PASS smg_client
 ```
 
 The script runs unmodified from a checkout of SMG at the pinned commit; the
-check refuses another commit.
+check refuses another commit. It passes `--selector engine=atom` in place of
+the script's default `engine=sglang`, as the
+[Ruling on #77](https://github.com/junyyang-amd/ATOM/issues/77#issuecomment-6943320782)
+and #76 A8 fix.
 
 ### A9: 1P1D (goal 7)
 
@@ -173,15 +176,15 @@ sequenceDiagram
     participant P as ATOM prefill
     participant D as ATOM decode
     H->>M: 64 concurrent completions (in flight)
-    H->>M: fan-out pause_generation {} (no selector filter: P and D)
+    H->>M: fan-out pause_generation {} ?selector=engine=atom (P and D)
     M->>P: pause
     M->>D: pause
-    H->>M: fan-out update_weights_from_disk {model_path, weight_version: v2}
-    M->>P: update: preempt prefills, does not wait on PD sends
-    M->>D: update: preempt running, parked requests stay parked
-    H->>M: fan-out continue_generation {}
+    H->>M: fan-out update_weights_from_disk {model_path, weight_version: v2} ?selector=engine=atom
+    M->>P: update: paused, v2 is new; preempt prefills, does not wait on PD sends
+    M->>D: update: paused, v2 is new; preempt running, parked requests stay parked
+    H->>M: fan-out continue_generation {} ?selector=engine=atom
     P-->>D: handoffs stamped v1 (before refit) or v2 (after)
-    D->>D: stamp == own version: first decode; else prefill locally
+    D->>D: stamp == own version: first decode; else free blocks, prefill on D
     Note over H: in flight: 64 completed, 0 failed
     H->>M: 32 prompts, one at a time
     Note over H: PASS when P and D report v2 and output equals a fresh 1P1D on v2
@@ -237,13 +240,7 @@ SMG's. `rl.*` labels override as in SMG.
 - Rejected: report ATOM as `sglang`. Ruled out on #77; its row would claim
   `abort` and `retract` pause modes ATOM lacks.
 
-### D4. A8's selector
-
-A8 passes `--selector engine=atom`. Settled by the
-[Ruling on #77](https://github.com/junyyang-amd/ATOM/issues/77#issuecomment-6943320782)
-and #76 A8; not a design choice.
-
-### D5. ATOM engine routes
+### D4. ATOM engine routes
 
 `atom/entrypoints/openai/api_server.py` registers the routes below with
 `_engine_route` only when the server runs with `--enable-rl`
@@ -261,8 +258,8 @@ and #76 A8; not a design choice.
 | POST `/update_weights_from_distributed` | `names`, `dtypes`, `shapes`, `group_name`, `flush_cache?`, `weight_version?` | `update_weights_from_distributed` |
 | POST `/destroy_weights_update_group` | `group_name` | `destroy_weights_update_group` |
 | POST `/flush_cache` | none | `clear_kv_cache` |
-| GET `/model_info` | none | answers `model_path`, `weight_version` |
-| POST `/generate` | see D10 | the completion path |
+| GET `/model_info` | none | `get_weight_version`; answers `model_path`, `weight_version` (D8) |
+| POST `/generate` | see D9 | the completion path |
 
 - Basis: code: `api_server.py: _engine_route` relays management routes to
   the engine-owning process; `engine_utility.py: EngineUtilityHandler`
@@ -275,7 +272,7 @@ and #76 A8; not a design choice.
   HTTP. It wraps the same utility commands for verl and adds nothing the
   handlers lack.
 
-### D6. The served runner
+### D5. The served runner
 
 `--enable-rl` sets `runner_qualname` to
 `atom.rollout.model_runner_ext.RLHFModelRunner`, as `AsyncLLMEngine.__init__`
@@ -288,7 +285,7 @@ does, unless the user set another.
 - Rejected: move `WeightUpdaterMixin` into `ModelRunner`. Every served
   engine would carry it, RL or not.
 
-### D7. Loading from disk
+### D6. Loading from disk
 
 `RLHFModelRunner.update_weights_from_disk(model_path)` on every TP rank calls
 `update_weights` once, passing
@@ -306,7 +303,7 @@ prefixes and is committed by FINISH like an SHM update.
 - Rejected: call `load_model` again. Post-processing would run on already
   processed weights.
 
-### D8. The trainer group
+### D7. The trainer group
 
 `init_weights_update_group` runs `RLHFModelRunner.init_weights_update_group`
 on every TP rank: it joins a NCCL group through torch's
@@ -317,7 +314,7 @@ on every TP rank: it joins a NCCL group through torch's
 and yields it into one `update_weights` call; `destroy_weights_update_group`
 destroys the group. Group init and destroy run through
 `EngineUtilityHandler._utility_on_every_rank`; the update joins
-`WEIGHT_UPDATE_UTILITY_CMDS` (D7).
+`WEIGHT_UPDATE_UTILITY_CMDS` (D6).
 
 - Basis: data: [spike #91](https://github.com/junyyang-amd/ATOM/issues/91) (PR #93 at 2db68bb3): at TP2 on
   Qwen3-8B the group formed beside ATOM's TP group, took every parameter,
@@ -335,22 +332,44 @@ parameters, so each chunk is one `update_weights` call, which clears
 never take that path; FP8 checkpoints are a non-goal here, and the defect
 is [#97](https://github.com/junyyang-amd/ATOM/issues/97).
 
-### D9. `weight_version`
+### D8. `weight_version`
 
-The scheduler holds the engine's version string: `--weight-version`
-(default `"default"`), replaced when a committed update names one.
-`/generate` `meta_info.weight_version` and `/model_info` report it.
-`/v1/rl/workers[].weight_version` stays the registration label, as in SMG.
+The scheduler, in the EngineCore process, holds the engine's version
+string: `--weight-version` (default `"default"`), replaced when a committed
+update names one. The API server reads it two ways:
+
+- `/model_info` is an `_engine_route`, so with `--api-server-count` above 1
+  a front-end worker relays it to the hub. The hub sends the utility command
+  `get_weight_version` through `CoreManager.broadcast_utility_command_sync`
+  and answers DP rank 0's reply; every DP engine commits an update in the
+  same FINISH, so their versions agree once it returns.
+- `/generate` reads it from the request's own output: the scheduler sets a
+  new field `RequestOutput.weight_version` on every output it builds
+  (`Scheduler.postprocess`), and the response reports the one on the final
+  output. `RequestOutput` is pickled whole from EngineCore to the hub and
+  from the hub to a front-end worker (`frontend_workers.py: FrontendHub`),
+  so the field reaches every API process with no relay.
+
+A request in flight across a refit reports the version its last token was
+sampled under: the new one, since the refit preempts it and it finishes
+after the commit. `/v1/rl/workers[].weight_version`
+stays the registration label, as in SMG.
 
 - Basis: reference: SMG `discovery.rs: entry` reads
   `labels["weight_version"]`; its examples verify through `/generate` and
   `/model_info`. code: ATOMesh's own `/generate` rendering reports
   `"default"` when a worker gives no version
-  (`routers/render/generate_streaming.rs`).
+  (`routers/render/generate_streaming.rs`); `api_server.py: _engine_route`
+  sends a management route to the engine-owning process;
+  `engine_core_mgr.py: CoreManager.broadcast_utility_command_sync` returns
+  every DP engine's reply.
+- Rejected: the hub caches the version from the committed update's reply.
+  A second copy of state the engine owns, right only while every update
+  passes through the hub's routes.
 - Rejected: ATOMesh rewrites the label after a refit. A difference from SMG
   no acceptance item needs.
 
-### D10. `/generate` on ATOM
+### D9. `/generate` on ATOM
 
 An SGLang-shaped `/generate` behind `--enable-rl`: `text` or `input_ids`,
 `sampling_params` (`max_new_tokens`, `temperature`, `top_p`, `top_k`,
@@ -367,7 +386,7 @@ cached_tokens, weight_version}`. It runs the completion path;
 - Rejected: the harness uses `/v1/completions` only. A8's unmodified script
   posts `/generate`.
 
-### D11. Pause, single instance
+### D10. Pause, single instance
 
 ATOM keeps its `keep` mode: running requests wait; the update preempts them
 (`Scheduler.preempt_running`) and after resume they recompute prompt and
@@ -379,15 +398,15 @@ generated tokens on the new weights, keeping their tokens; none fails.
 - Rejected: SGLang's default `abort`. It fails requests; A7 and A9 require 0
   failed.
 
-### D12. PD in-flight policy
+### D11. PD in-flight policy
 
 The policy: no request fails, and no KV computed with other weights is
 decoded on. Requests waiting on P are prefilled after the resume on P's new
 weights. Every handoff P produces carries P's `weight_version`; D lets each
 transfer finish as today, then decodes on the received KV only when the
-stamp equals its own version, and otherwise prefills the request itself. A
-refit under PD must name a new `weight_version`, since the stamp is the only
-thing that tells old KV from new.
+stamp equals its own version, and otherwise prefills the request itself.
+The stamp is the only thing that tells old KV from new, so a P/D engine
+resumes only on weights a new `weight_version` names (rule 5).
 
 Changes behind it:
 
@@ -397,16 +416,43 @@ Changes behind it:
    carries it to D in `kv_transfer_params`
    (`core/placement/backend/atom.rs: AtomAdapter::enrich_decode_kv` adds
    fields and keeps the rest).
-2. D's `Scheduler._resolve_waiting_remote_kv` compares the stamp after the
-   transfer resolves and before `_update_waiting_for_remote_kv` hashes the
-   received prefix; a mismatch takes the failed-load path
-   (`_consume_failed_remote_kv`): blocks freed, prompt prefilled on D.
+2. D's `Scheduler._resolve_waiting_remote_kv` compares the stamp once the
+   transfer has finished and before `_update_waiting_for_remote_kv` hashes
+   the received prefix (`BlockManager.register_received_prefix`). On a
+   mismatch a new `Scheduler._recompute_stale_remote_kv` releases the parked
+   count (`_uncount_inflight_load`), frees the whole block table
+   (`BlockManager.deallocate`: the received KV, and any prefix hit D claimed
+   before its own refit zeroed it, hold nothing usable), sets
+   `num_cached_tokens` to 0 and returns the request to ordinary prefill
+   admission on D. It is not `_consume_failed_remote_kv`, the offload
+   `failed_loading` path, which keeps the table and resumes from
+   `num_cached_tokens`. A handoff with no stamp (P without `--enable-rl`) is
+   decoded as today.
 3. On a weight change, `Scheduler.preempt_running` stops refusing parked
    requests: they keep their blocks until their transfer resolves, then rule
    2 applies. It still refuses running sequences a connector holds.
 4. On a weight change, `EngineCore.prepare_kv_change` does not wait for PD
    sends (the receiver discards their content by version); it still waits
    for offload transfers, whose KV is kept.
+5. Under a P/D connector (`EngineCore.kv_transfer_enabled` with a producer
+   or consumer, not an offload tier), the engine's update handler refuses,
+   before loading any tensor, an update sent while generation is not paused
+   (`EngineCore.pause_generation`) or one naming the version the engine
+   already holds; the route answers 400. An update naming no version is
+   applied, since SMG's trainer stamps only its last chunk
+   (SMG `examples/rl/refit_from_trainer.py`), and marks the version stale;
+   `continue_generation` answers 400 while it is stale, and an update naming
+   a new version clears it. A refit that stops part-way therefore leaves the
+   pair paused rather than serving mixed weights under one stamp.
+
+Rule 2 departs from the rule `_abort_failed_remote_receive` states: a failed
+P/D receive aborts, because decode is not sized for an unbounded local
+prefill. That rule stays for a failed receive. A stale stamp differs in two
+ways. It occurs only for handoffs that cross a refit, so its local prefills
+are bounded by the requests in flight at that refit; D already runs that
+many, since a weight change preempts D's running decodes and they recompute
+on D (`Scheduler.preempt_running`, D10). And aborting them fails requests,
+which A9 forbids.
 
 - Basis: data: [spike #92](https://github.com/junyyang-amd/ATOM/issues/92) (PR #96 at 15dd68e0), 1P1D over `tcp`
   with requests in flight, in every order: D refused every update (`cannot
@@ -419,6 +465,9 @@ Changes behind it:
   dispatch_atom_relay_internal`), so a handoff P made before its refit can
   reach D after D's. `memory_manager.py: MemoryManagerMixin.clear_kv_cache`
   zeroes the pool in place, so P's held send blocks stay valid memory.
+- Rejected: abort on a stale stamp, as `_abort_failed_remote_receive` does
+  for a failed receive. Every handoff that crosses the refit fails, and A9
+  requires 0 failed.
 - Rejected: drain both sides before the update. A paused D resolves no
   parked request, and a request P finished after D paused reaches D later,
   so a drain ends only by running forwards on the old weights.
@@ -426,7 +475,7 @@ Changes behind it:
   handoff that reaches D after D's refit would still be decoded on P's old
   KV.
 
-### D13. Long-rollout launch profile
+### D12. Long-rollout launch profile
 
 `--enable-rl` changes no other default. Every check launches ATOMesh with
 `--enable-rl --disable-health-check --disable-circuit-breaker
@@ -439,7 +488,7 @@ Changes behind it:
 - Rejected: `--enable-rl` implies the profile. A difference from SMG no
   acceptance item needs.
 
-### D14. ATOM worker labels
+### D13. ATOM worker labels
 
 With `--enable-rl` and backend `atom`, discovery also reads ATOM's
 `/server_info` `tp_size` and `dp_size` into labels, as
@@ -455,16 +504,16 @@ and a trainer can lay out ranks.
   `POST /workers`. A framework launching ATOMesh with `--worker-urls` would
   then get wrong rank offsets at TP2.
 
-### D15. Mooncake transport for A9
+### D14. Mooncake transport for A9
 
 A9 runs mooncake over `tcp`. #95 (`rdma` on g24 decodes garbage) stays its
-own issue; D12 does not depend on the transport.
+own issue; D11 does not depend on the transport.
 
 - Basis: data: spike #92 ran over `tcp` with 0 failed requests; #95's
   evidence. The requirement names no transport.
 - Rejected: block A9 on #95. Nothing in A9 needs `rdma`.
 
-### D16. Acceptance harness
+### D15. Acceptance harness
 
 One `tools/rl/accept.py` with a subcommand per check. Each starts its own
 workers and ATOMesh on g24 in containers named `rl-<issue>-<role>`, compares
@@ -521,7 +570,7 @@ Differences, each with its reason:
 | gRPC / ZMQ workers via `rl.control_url`, `RlControlCalls` | HTTP workers only; others answer `no_control_endpoint` | gRPC workers are a non-goal. |
 | `smg_rl_*` metrics | None | No acceptance item reads them. |
 
-ATOM engine routes against SGLang's (D5): `pause_generation` accepts only
+ATOM engine routes against SGLang's (D4): `pause_generation` accepts only
 `keep`, since ATOM cannot abort or retract a pause; an update always zeroes
 the KV pool and forgets cached prefixes whatever `flush_cache` says (goal 3);
 `/get_weight_version` and `/update_weight_version` are not served.
@@ -535,9 +584,9 @@ Provided (ROCm/ATOM#549 and later): `RLHFModelRunner` with
 `pause_generation` / `resume_generation` utility commands; the weight-sync
 fence, FINISH commit and prefix forgetting in `EngineUtilityHandler`.
 
-Added: the HTTP routes (D5), runner selection by flag (D6),
-`update_weights_from_disk` (D7), the trainer group and its commands
-(D8), `weight_version` (D9), `/generate` (D10), and the PD stamp (D12).
+Added: the HTTP routes (D4), runner selection by flag (D5),
+`update_weights_from_disk` (D6), the trainer group and its commands
+(D7), `weight_version` (D8), `/generate` (D9), and the PD stamp (D11).
 
 ## Simpler alternative
 
@@ -551,7 +600,7 @@ different weights.
 ## Low confidence
 
 None. The design loop's `low` decisions, the trainer group and the PD
-policy, were settled by spikes #91 and #92 (D8, D12).
+policy, were settled by spikes #91 and #92 (D7, D11).
 
 ## Dependencies
 
@@ -561,7 +610,7 @@ policy, were settled by spikes #91 and #92 (D8, D12).
 | [#92](https://github.com/junyyang-amd/ATOM/issues/92) PD refit in flight | D refuses an update while requests wait for remote KV; P applies; none fails | #96 closed unmerged at 15dd68e0 |
 
 No interface is upstream-only, so there is no sync issue. #95 (mooncake
-`rdma` on g24) is open and does not block A9 (D15).
+`rdma` on g24) is open and does not block A9 (D14).
 
 ## Summary
 
@@ -579,13 +628,14 @@ chunks, `smg_rl_*` metrics, rewriting the registration `weight_version`.
 | `atom/mesh/src/rl/` (new) | selector, discovery, proxy, fanout, error, capability | D1-D3 |
 | `atom/mesh/src/cliargs.rs`, `src/config/types.rs` | `--enable-rl`, `--rl-control-timeout-secs`, `--rl-fanout-concurrency`; `RouterConfig.rl` | D1, D2 |
 | `atom/mesh/src/server.rs` | mount `/v1/rl` when enabled | D1 |
-| `atom/mesh/src/core/steps/worker/local/discover_metadata.rs` | ATOM `tp_size`, `dp_size` labels when RL is on | D14 |
-| `atom/model_engine/arg_utils.py`, `atom/config.py` | `--enable-rl`, `--weight-version`; runner selection | D5, D6, D9 |
-| `atom/entrypoints/openai/api_server.py` | engine routes, `/model_info`, `/generate` | D5, D10 |
-| `atom/model_engine/engine_utility.py` | new commands, version set on commit | D5, D7-D9 |
-| `atom/rollout/model_runner_ext.py` | from-disk update; trainer group init, receive, destroy | D7, D8 |
-| `atom/model_engine/scheduler.py`, `engine_core.py` | version on the scheduler; PD stamp and check; parked requests on a weight change; no wait on PD sends | D9, D12 |
-| `tools/rl/accept.py` (new) | the checks below | D16 |
+| `atom/mesh/src/core/steps/worker/local/discover_metadata.rs` | ATOM `tp_size`, `dp_size` labels when RL is on | D13 |
+| `atom/model_engine/arg_utils.py`, `atom/config.py` | `--enable-rl`, `--weight-version`; runner selection | D4, D5, D8 |
+| `atom/entrypoints/openai/api_server.py` | engine routes, `/model_info`, `/generate` | D4, D9 |
+| `atom/model_engine/engine_utility.py` | new commands, `get_weight_version`, version set on commit; under P/D, the update and resume refusals | D4, D6-D8, D11 |
+| `atom/model_engine/request.py` | `RequestOutput.weight_version` | D8 |
+| `atom/rollout/model_runner_ext.py` | from-disk update; trainer group init, receive, destroy | D6, D7 |
+| `atom/model_engine/scheduler.py`, `engine_core.py` | version on the scheduler and on each `RequestOutput`; PD stamp, check and `_recompute_stale_remote_kv`; parked requests on a weight change; no wait on PD sends | D8, D11 |
+| `tools/rl/accept.py` (new) | the checks below | D15 |
 | `tests/`, `atom/mesh` Rust tests | CPU tests for the new logic | principle: unit tests run without a GPU |
 
 **Acceptance**
@@ -598,6 +648,6 @@ chunks, `smg_rl_*` metrics, rewriting the registration `weight_version`.
 | A4 selector | `atom/mesh/src/rl/` selector and fanout | `python3 tools/rl/accept.py selector` |
 | A5 cache | `engine_utility.py` (`kv_change`, prefix forgetting), `/generate` `cached_tokens` | `python3 tools/rl/accept.py cache` |
 | A6 refit time | `tools/rl/accept.py` timing from A2 and A3 | `python3 tools/rl/accept.py timing` |
-| A7 stability | A2's, the D13 launch profile | `python3 tools/rl/accept.py stability` |
+| A7 stability | A2's, the D12 launch profile | `python3 tools/rl/accept.py stability` |
 | A8 SMG client | A2's, `/generate`, `engine=atom` (D3) | `python3 tools/rl/accept.py smg_client` |
-| A9 1P1D | A2's, `scheduler.py`, `engine_core.py` (D12) | `python3 tools/rl/accept.py pd` |
+| A9 1P1D | A2's, `scheduler.py`, `engine_core.py` (D11) | `python3 tools/rl/accept.py pd` |
