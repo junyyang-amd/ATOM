@@ -179,6 +179,7 @@ class EngineArgs:
     spec_decode_acceptance_rate: float | None = None
     spec_decode_acceptance_length: float | None = None
     mark_trace: bool = False
+    enable_rl: bool = False
     enable_rapidserve: bool = False
     disagg_prefill_max_num_seqs: int | None = None
     disagg_constrained: bool = False
@@ -741,6 +742,13 @@ class EngineArgs:
             "--mark-trace",
             action="store_true",
             help="Enable graph_marker nodes for tracing/profile instrumentation.",
+        )
+        parser.add_argument(
+            "--enable-rl",
+            action="store_true",
+            help="Serve the RL rollout routes (pause_generation, "
+            "continue_generation, flush_cache, update_weights_from_disk) and "
+            "run the RLHF model runner, which can update weights in place.",
         )
         parser.add_argument(
             "--enable-rapidserve",

@@ -14,6 +14,7 @@ from aiter.dist.utils import get_distributed_init_method
 
 from atom.model_engine.model_runner import ModelRunner
 from atom.model_engine.scheduler import ScheduledBatch, ScheduledBatchOutput
+from atom.model_loader.weight_iterator import safetensors_weights_iterator
 from atom.rollout.capabilities import CapabilityProviderMixin
 from atom.rollout.memory_manager import MemoryManagerMixin
 from atom.rollout.weight_updater import WeightUpdaterMixin
@@ -130,6 +131,15 @@ class RLHFModelRunner(
             hidden_states,
             needs_independent_noise=needs_independent_noise,
         )
+
+    def update_weights_from_disk(self, model_path: str) -> int:
+        """Overwrite the weights with the safetensors checkpoint at *model_path*.
+
+        One ``update_weights`` call over a generator, so one tensor is read at
+        a time; ``load_model`` is not rerun, since its post-processing would
+        run again on weights it already processed.
+        """
+        return self.update_weights(safetensors_weights_iterator(model_path))
 
     def _setup_device_and_distributed(self, rank: int, config):
         """Override to set up DP-isolated NCCL worlds.

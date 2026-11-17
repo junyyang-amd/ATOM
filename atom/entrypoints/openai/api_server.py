@@ -49,6 +49,10 @@ from atom.kv_transfer.disaggregation.mooncake.endpoint import (
     producer_endpoint,
 )
 from atom.model_engine.arg_utils import EngineArgs
+from atom.model_engine.engine_utility import (
+    PAUSE_GENERATION_CMD,
+    RESUME_GENERATION_CMD,
+)
 from atom.model_engine.llm_engine import load_tokenizer
 from atom.model_engine.request import RequestOutput
 from atom.model_engine.segment_tokenizer import PrefixEncoding
@@ -3688,6 +3692,58 @@ async def stop_profile():
         raise HTTPException(status_code=500, detail=f"Failed to stop profiling: {e!s}")
 
 
+# RL control routes (--enable-rl): each path, the utility command it sends, and
+# the body fields it passes on, under SGLang's names.
+_RL_ROUTES = {
+    "/pause_generation": (PAUSE_GENERATION_CMD, ("mode",)),
+    "/continue_generation": (RESUME_GENERATION_CMD, ()),
+    "/flush_cache": ("clear_kv_cache", ()),
+    "/update_weights_from_disk": (
+        "update_weights_from_disk",
+        ("model_path", "weight_version", "flush_cache"),
+    ),
+}
+
+
+def register_rl_routes(args) -> None:
+    """Serve ``_RL_ROUTES`` when the server runs with ``--enable-rl``."""
+    if not args.enable_rl:
+        return
+    for path, (cmd, fields) in _RL_ROUTES.items():
+        _engine_route(path, methods=["POST"], name=cmd)(_rl_route(cmd, fields))
+
+
+def _rl_route(cmd: str, fields: tuple[str, ...]):
+    async def route(request: Request) -> JSONResponse:
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError as exc:
+            return _rl_reply(False, f"body is not JSON: {exc}")
+        if not isinstance(body, dict):
+            return _rl_reply(False, "body must be a JSON object")
+        if cmd == "update_weights_from_disk" and not body.get("model_path"):
+            return _rl_reply(False, "model_path is required")
+        kwargs = {name: body[name] for name in fields if name in body}
+        try:
+            await asyncio.to_thread(
+                engine.core_mgr.broadcast_utility_command_sync, cmd, **kwargs
+            )
+        except Exception as exc:  # noqa: BLE001 - answered as the route's 400
+            logger.error("%s failed: %s", cmd, exc)
+            return _rl_reply(False, str(exc))
+        return _rl_reply(True, f"{cmd} succeeded")
+
+    return route
+
+
+def _rl_reply(success: bool, message: str) -> JSONResponse:
+    return JSONResponse(
+        {"success": success, "message": message},
+        status_code=200 if success else 400,
+    )
+
+
 # ============================================================================
 # Main Entry Point
 # ============================================================================
@@ -3776,6 +3832,7 @@ def main():
     args = parser.parse_args()
     if args.api_server_count < 1:
         parser.error("--api-server-count must be at least 1")
+    register_rl_routes(args)
 
     _setup_frontend(args)
 
@@ -4018,6 +4075,7 @@ def _frontend_worker_main(args, config, info, parent_pid) -> None:
     watch_parent(parent_pid)
     _frontend_hub_uds = info["admin_uds"]
     _frontend_stats = (info["stats"], info["index"])
+    register_rl_routes(args)
     _setup_frontend(args)
     _setup_reasoning_and_tools(args)
     engine = FrontendEngine(config, tokenizer, info)

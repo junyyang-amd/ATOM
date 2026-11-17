@@ -2344,6 +2344,8 @@ class Config:
     # from all2all backend/mode: Mega owns dispatch, both GEMMs, and combine.
     moe_backend: str = "standard"
     runner_qualname: str = "atom.model_engine.model_runner.ModelRunner"
+    # Serve the RL control routes (pause, refit, resume) on the RLHF runner.
+    enable_rl: bool = False
     # EPLB master switch + sub-config
     eplb_enable: bool = False
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
@@ -2590,6 +2592,22 @@ class Config:
                 "experimental RCCL prepare/finalize backend"
             )
 
+    def _select_runner(self) -> None:
+        """The runner a mode needs, unless the user set ``runner_qualname``.
+
+        RapidServe (intra-GPU prefill/decode disagg) needs its own runner in
+        both the prefill and decode processes; the RL routes update weights in
+        place, which only the RLHF runner can.
+        """
+        if self.runner_qualname != "atom.model_engine.model_runner.ModelRunner":
+            return
+        if self.enable_rapidserve:
+            self.runner_qualname = (
+                "atom.model_engine.model_runner.RapidServeModelRunner"
+            )
+        elif self.enable_rl:
+            self.runner_qualname = "atom.rollout.model_runner_ext.RLHFModelRunner"
+
     def __post_init__(self):
         if self.sequence_parallel_size < 1:
             raise ValueError("sequence_parallel_size must be at least 1")
@@ -2657,16 +2675,7 @@ class Config:
                 "forced-acceptance runs."
             )
 
-        # RapidServe (intra-GPU prefill/decode disagg) needs a specialized
-        # runner in both the prefill and decode processes. Select it unless the
-        # user explicitly overrode runner_qualname.
-        if (
-            self.enable_rapidserve
-            and self.runner_qualname == "atom.model_engine.model_runner.ModelRunner"
-        ):
-            self.runner_qualname = (
-                "atom.model_engine.model_runner.RapidServeModelRunner"
-            )
+        self._select_runner()
 
         assert 1 <= self.tensor_parallel_size <= 8
         if self.decode_context_parallel_size > 1:
