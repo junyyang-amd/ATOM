@@ -88,7 +88,9 @@ def launch_worker(h, tp: int, old: str) -> str:
 
 def start_trainer(h, tp: int, new: str, gpu: int) -> str:
     argv = trainer_argv(h.smg, h.mesh_url, h.model_dir(new), h.take_port())
-    return h.start_trainer([gpu], argv, role=f"trainer-tp{tp}")
+    # The row's worker holds the tp GPUs just before the trainer's.
+    workers = list(range(gpu - tp, gpu))
+    return h.start_trainer([gpu], argv, role=f"trainer-tp{tp}", peers=workers)
 
 
 def plan(h) -> list[str]:

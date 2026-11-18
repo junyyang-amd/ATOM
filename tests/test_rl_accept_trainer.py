@@ -44,11 +44,11 @@ def test_dry_run_plans_each_row_worker_trainer_then_fresh(models, monkeypatch, c
         ("rl-110-atom-18200", "0"),
         ("rl-110-mesh-build", None),
         ("rl-110-mesh-18202", None),
-        ("rl-110-trainer-tp1", "1"),
+        ("rl-110-trainer-tp1", "1,0"),
         ("rl-110-atom-18205", "2"),
         ("rl-110-atom-18207", "3,4"),
         ("rl-110-mesh-18209", None),
-        ("rl-110-trainer-tp2", "5"),
+        ("rl-110-trainer-tp2", "5,3,4"),
         ("rl-110-atom-18212", "6,7"),
     ]
     trainer = shlex.split(next(s for s in steps if "rl-110-trainer-tp2" in s))
@@ -96,7 +96,7 @@ def fake_trainer(exit_code=0, stale=(), drift=None, running=False, tp_size=None)
             tp = tp_size or self.rows[-1][1]
             return 200, {"workers": [{"tp_size": tp}], "total": 1}
 
-        def start_trainer(self, gpus, argv, role="trainer"):
+        def start_trainer(self, gpus, argv, role="trainer", peers=()):
             row = f"tp{self.rows[-1][1]}"
             if exit_code == 0 and row not in stale:
                 version = argv[argv.index("--weight-version") + 1]
