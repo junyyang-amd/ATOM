@@ -604,7 +604,9 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--dry-run", action="store_true", help="print the steps; run nothing"
     )
-    ap.add_argument("--smg", default=SMG_DIR, help="SMG checkout whose scripts the checks run")
+    ap.add_argument(
+        "--smg", default=SMG_DIR, help="SMG checkout whose scripts the checks run"
+    )
     ap.add_argument("--tree-digest", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     sys.modules.setdefault("accept", sys.modules[__name__])
