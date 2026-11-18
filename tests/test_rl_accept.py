@@ -232,3 +232,77 @@ def test_a_run_first_removes_its_issues_leftover_containers(
     assert (code, out) == (0, "PASS mesh_sglang")
     assert ["docker", "rm", "-f", "rl-106-sglang-18200"] in calls
     assert not [c for c in calls if c[1] == "rm" and "rl-107-sglang-18200" in c]
+
+
+@pytest.fixture
+def fresh(tmp_path, monkeypatch):
+    """A fresh server over a three-token byte-level vocabulary plus EOS:
+    prompt "p" is ids [7, 8], and ``tops`` maps the ids after the prompt to
+    the chat route's top logprobs there (``[]``: its top token is hidden).
+    The chat requests are recorded in ``asked``."""
+    vocab = {"a": 0, "Ġb": 1, "c": 2}  # Ġ is the byte-level space
+    eos = {"id": 3, "content": "<|im_end|>", "special": True}
+    tokenizer = {"model": {"vocab": vocab}, "added_tokens": [eos]}
+    (tmp_path / "tokenizer.json").write_text(json.dumps(tokenizer))
+    tops, asked = {}, []
+
+    def http(method, url, body=None, timeout=None):
+        if url.endswith("/v1/completions"):
+            return 200, {"prompt_token_ids": [7, 8]}
+        asked.append(body["prompt_token_ids"])
+        top = [
+            {"bytes": list(raw), "logprob": lp}
+            for raw, lp in tops[tuple(body["prompt_token_ids"][2:])]
+        ]
+        entries = [{"top_logprobs": top}] if top else []
+        return 200, {"choices": [{"logprobs": {"content": entries}}]}
+
+    monkeypatch.setattr(accept, "http", http)
+    return str(tmp_path), tops, asked
+
+
+@pytest.mark.parametrize(
+    "behind,equal,why",
+    [(0.0, True, None), (0.4, True, None), (0.6, False, "0.600 below")],
+)
+def test_equals_fresh_holds_each_token_within_the_margin_of_the_fresh_top(
+    fresh, behind, equal, why
+):
+    checkpoint, tops, asked = fresh
+    tops[()] = [(b"a", -0.1), (b" b", -0.1 - behind)]
+    tops[(1,)] = [(b"c", -0.2)]
+    got = accept.Harness(107).equals_fresh(
+        "u", checkpoint, ["p"], [{"output_ids": [1, 2]}]
+    )
+    assert got["equal"] is equal and got["margin"] == accept.FRESH_MARGIN
+    assert got["first"] == (f"prompt 0 'p' token 0 (1): {why}" if why else None)
+    assert got["gap"] == pytest.approx(behind if equal else 0.0)
+    assert asked == ([[7, 8], [7, 8, 1]] if equal else [[7, 8]])
+
+
+def test_equals_fresh_fails_a_token_outside_the_fresh_top(fresh):
+    checkpoint, tops, _ = fresh
+    tops[()] = [(b"a", -0.1)]
+    got = accept.Harness(107).equals_fresh(
+        "u", checkpoint, ["p"], [{"output_ids": [2]}]
+    )
+    assert got["first"] == "prompt 0 'p' token 0 (2): not in its top"
+
+
+@pytest.mark.parametrize("token,equal", [(3, True), (0, False)])
+def test_equals_fresh_takes_a_hidden_fresh_top_as_a_special_token(fresh, token, equal):
+    checkpoint, tops, _ = fresh
+    tops[()] = []
+    outputs = [{"output_ids": [token]}]
+    assert (
+        accept.Harness(107).equals_fresh("u", checkpoint, ["p"], outputs)["equal"]
+        is equal
+    )
+
+
+def test_equals_fresh_asks_a_prefix_once_per_server(fresh):
+    checkpoint, tops, asked = fresh
+    tops[()] = [(b"a", -0.1)]
+    h, outputs = accept.Harness(107), [{"output_ids": [0]}]
+    assert all(h.equals_fresh("u", checkpoint, ["p"], outputs)["equal"] for _ in "xy")
+    assert asked == [[7, 8]]

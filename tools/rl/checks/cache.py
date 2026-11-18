@@ -1,17 +1,17 @@
 """No prefix cache from the old weights survives a refit from disk.
 
 On each of two ATOM workers behind ATOMesh, ``/generate`` of PROBE (a long
-shared prefix and a tail) twice, then a refit to NEW, then PROBE once more;
-PROBE also on a fresh worker started on NEW. PASS when, on each worker, the
-second send before the refit reports cached prompt tokens (the probe can see
-a hit), the send after it reports none, and its token ids equal the fresh
-worker's.
+shared prefix and a tail) twice, then a refit to NEW, then PROBE once more,
+compared teacher-forced with a fresh worker started on NEW. PASS when, on each
+worker, the second send before the refit reports cached prompt tokens (the
+probe can see a hit), the send after it reports none, and its output equals
+fresh.
 """
 
 from __future__ import annotations
 
 from accept import Verdict
-from checks.refit_disk import SELECTOR, cycle_calls, first_mismatch, launch, refit
+from checks.refit_disk import FRESH_COMPARE, SELECTOR, cycle_calls, launch, refit
 
 ISSUE = 107
 VERSION = "cache-v2"
@@ -37,7 +37,7 @@ def plan(h) -> list[str]:
         *calls,
         *[f"POST {url}/generate PROBE" for url in workers],
         h.steps[-1],
-        "POST <fresh>/generate PROBE",
+        FRESH_COMPARE,
     ]
 
 
@@ -46,24 +46,27 @@ def run(h) -> Verdict:
     before = {url: h.generate(url, [PROBE, PROBE]) for url in workers}
     refit(h, SELECTOR, new, VERSION)
     after = {url: h.generate(url, [PROBE])[0] for url in workers}
-    fresh = h.generate(h.start_atom_workers(1, new)[0], [PROBE])[0]
-    return judge(before, after, fresh)
+    fresh = h.start_atom_workers(1, new)[0]
+    compared = {
+        url: h.equals_fresh(fresh, new, [PROBE], [out]) for url, out in after.items()
+    }
+    return judge(before, after, compared)
 
 
-def judge(before: dict, after: dict, fresh: dict) -> Verdict:
+def judge(before: dict, after: dict, compared: dict) -> Verdict:
     """The verdict on each worker's PROBE answers: ``before`` the two sent
-    before the refit, ``after`` the one sent after it."""
+    before the refit, ``after`` the one sent after it, ``compared`` its
+    ``equals_fresh`` comparison."""
     workers, failed = {}, []
     for url, (_, again) in before.items():
         hit = again["meta_info"]["cached_tokens"]
         cached = after[url]["meta_info"]["cached_tokens"]
-        mismatch = first_mismatch([PROBE], [after[url]], [fresh])
         workers[url] = {"cached_before": hit, "cached_after": cached}
-        workers[url]["mismatch"] = mismatch
+        workers[url]["fresh"] = compared[url]
         if not hit > 0:
             failed.append(f"{url} cached_tokens {hit} on the repeat before the refit")
         if cached != 0:
             failed.append(f"{url} cached_tokens {cached} after the refit")
-        if mismatch:
-            failed.append(f"{url} {mismatch}")
+        if not compared[url]["equal"]:
+            failed.append(f"{url} differs from fresh at {compared[url]['first']}")
     return Verdict(not failed, "; ".join(failed), {"workers": workers})

@@ -3,9 +3,10 @@
 Two ``--enable-rl`` ATOM workers on OLD behind ATOMesh; pause ->
 ``update_weights_from_disk`` (NEW, a new ``weight_version``) -> continue as
 fan-outs with ``selector=engine=atom``; then the fixed prompts on each worker's
-``/generate``, and the same prompts on a fresh worker started on NEW. PASS when
-every output reports the new version and has the fresh worker's token ids. The
-JSON holds the refit's wall time, pause sent to continue answered.
+``/generate``, compared teacher-forced with a fresh worker started on NEW
+(``Harness.equals_fresh``). PASS when every output reports the new version and
+equals fresh. The JSON holds the refit's wall time, pause sent to continue
+answered.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ ISSUE = 107
 OLD, NEW = "Qwen/Qwen3-1.7B-Base", "Qwen/Qwen3-1.7B"
 SELECTOR = "engine=atom"
 VERSION = "refit-disk-v2"
+FRESH_COMPARE = "POST <fresh>/v1/chat/completions per output token, teacher-forced"
 CYCLE = ("pause_generation", "update_weights_from_disk", "continue_generation")
 
 
@@ -62,15 +64,6 @@ def _fanout_ok(status, answer) -> bool:
     )
 
 
-def first_mismatch(prompts, outputs, fresh) -> str | None:
-    """The first prompt whose output token ids differ from the fresh ones, by
-    its index and its first 40 characters."""
-    for i, (out, want) in enumerate(zip(outputs, fresh, strict=True)):
-        if out["output_ids"] != want["output_ids"]:
-            return f"prompt {i} {prompts[i][:40]!r} differs from fresh"
-    return None
-
-
 def plan(h) -> list[str]:
     workers, new = launch(h)
     calls = [
@@ -81,27 +74,30 @@ def plan(h) -> list[str]:
         f"POST {url}/generate x{len(PROMPTS)}, one at a time" for url in workers
     ]
     h.start_atom_workers(1, new)
-    return [*h.steps[:-1], *calls, *generate, h.steps[-1], "POST <fresh>/generate"]
+    return [*h.steps[:-1], *calls, *generate, h.steps[-1], FRESH_COMPARE]
 
 
 def run(h) -> Verdict:
     workers, new = launch(h)
     refit_s = refit(h, SELECTOR, new, VERSION)
     outputs = {url: h.generate(url, PROMPTS) for url in workers}
-    fresh = h.generate(h.start_atom_workers(1, new)[0], PROMPTS)
-    return judge(outputs, fresh, refit_s)
+    fresh = h.start_atom_workers(1, new)[0]
+    compared = {
+        url: h.equals_fresh(fresh, new, PROMPTS, outs) for url, outs in outputs.items()
+    }
+    return judge(outputs, compared, refit_s)
 
 
-def judge(outputs: dict, fresh: list[dict], refit_s: float) -> Verdict:
-    """The verdict on each worker's ``/generate`` answers against ``fresh``."""
+def judge(outputs: dict, compared: dict, refit_s: float) -> Verdict:
+    """The verdict on each worker's ``/generate`` answers and on their
+    ``equals_fresh`` comparison."""
     workers, failed = {}, []
     for url, outs in outputs.items():
         versions = sorted({o["meta_info"]["weight_version"] for o in outs})
-        mismatch = first_mismatch(PROMPTS, outs, fresh)
-        workers[url] = {"weight_versions": versions, "mismatch": mismatch}
+        workers[url] = {"weight_versions": versions, "fresh": compared[url]}
         if versions != [VERSION]:
             failed.append(f"{url} weight_version {versions}")
-        if mismatch:
-            failed.append(f"{url} {mismatch}")
+        if not compared[url]["equal"]:
+            failed.append(f"{url} differs from fresh at {compared[url]['first']}")
     data = {"refit_s": round(refit_s, 2), "workers": workers}
     return Verdict(not failed, "; ".join(failed), data)

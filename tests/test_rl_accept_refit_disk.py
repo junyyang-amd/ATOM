@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "rl"))
 import accept
-from checks import cache, refit_disk
+from checks import refit_disk
 
 
 @pytest.fixture
@@ -72,7 +72,7 @@ def test_dry_run_plans_two_workers_a_refit_then_a_fresh_worker(
         s.split(":")[-1] if "/generate" in s else s.split("?")[0] for s in between
     ] == calls
     assert all("?selector=engine=atom " in s for s in between if "/v1/rl/" in s)
-    assert steps[-1].startswith("POST <fresh>/generate")
+    assert steps[-1] == refit_disk.FRESH_COMPARE
 
 
 def fake_atom(stale=(), drift=None, keep_cache=False):
@@ -126,6 +126,13 @@ def fake_atom(stale=(), drift=None, keep_cache=False):
                 out.append({"output_ids": ids, "meta_info": meta})
             return out
 
+        def equals_fresh(self, url, checkpoint, prompts, outputs):
+            """Equal unless an output drifted; the first drifted one is named."""
+            assert self.held[url][0] == checkpoint == "/ckpt/" + refit_disk.NEW
+            drifted = [i for i, o in enumerate(outputs) if o["output_ids"][1]]
+            first = f"prompt {drifted[0]} token 1" if drifted else None
+            return {"equal": not drifted, "first": first, "gap": 0.0, "margin": 0.5}
+
     return FakeAtom
 
 
@@ -151,7 +158,7 @@ def test_refit_disk_passes_and_records_the_refit_time(on_node, monkeypatch, caps
     assert record["passed"] and record["data"]["refit_s"] >= 0
     assert record["data"]["workers"]["http://w1"] == {
         "weight_versions": [refit_disk.VERSION],
-        "mismatch": None,
+        "fresh": {"equal": True, "first": None, "gap": 0.0, "margin": 0.5},
     }
 
 
@@ -159,10 +166,7 @@ def test_refit_disk_passes_and_records_the_refit_time(on_node, monkeypatch, caps
     "harness,reason",
     [
         (fake_atom(stale=("http://w1",)), "http://w1 weight_version ['default']"),
-        (
-            fake_atom(drift=5),
-            f"http://w0 prompt 5 {accept.PROMPTS[5]!r} differs from fresh",
-        ),
+        (fake_atom(drift=5), "http://w0 differs from fresh at prompt 5 token 1"),
     ],
 )
 def test_refit_disk_fails_naming_the_worker_and_first_differing_prompt(
@@ -188,11 +192,9 @@ def test_refit_disk_fails_on_a_refused_fanout(on_node, monkeypatch, capsys):
 def test_cache_passes_when_the_refit_drops_the_prefix(on_node, monkeypatch, capsys):
     assert _run(monkeypatch, capsys, "cache", fake_atom()) == (0, "PASS cache")
     workers = json.loads((on_node / "cache.json").read_text())["data"]["workers"]
-    assert workers["http://w0"] == {
-        "cached_before": 16,
-        "cached_after": 0,
-        "mismatch": None,
-    }
+    assert workers["http://w0"]["cached_before"] == 16
+    assert workers["http://w0"]["cached_after"] == 0
+    assert workers["http://w0"]["fresh"]["equal"]
 
 
 def test_cache_fails_when_the_prefix_survives_the_refit(on_node, monkeypatch, capsys):
@@ -201,9 +203,7 @@ def test_cache_fails_when_the_prefix_survives_the_refit(on_node, monkeypatch, ca
     assert (code, out) == (1, "FAIL cache: " + "; ".join(after))
 
 
-def test_cache_names_the_probe_briefly_when_it_differs_from_fresh(
-    on_node, monkeypatch, capsys
-):
+def test_cache_fails_when_the_probe_differs_from_fresh(on_node, monkeypatch, capsys):
     code, out = _run(monkeypatch, capsys, "cache", fake_atom(drift=-1))
-    differs = f"prompt 0 {cache.PROBE[:40]!r} differs from fresh"
+    differs = "differs from fresh at prompt 0 token 1"
     assert (code, out) == (1, f"FAIL cache: http://w0 {differs}; http://w1 {differs}")
