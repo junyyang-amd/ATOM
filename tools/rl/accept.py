@@ -380,14 +380,15 @@ class Harness:
             self.wait_ready(name, url)
         return [url for _, url in started]
 
-    def start_trainer(self, gpus: list[int], argv: list[str]) -> str:
-        """Run ``argv`` on ``gpus`` in the ATOM image with the tree importable; its name."""
+    def start_trainer(self, gpus: list[int], argv: list[str], role="trainer") -> str:
+        """Run ``argv`` on ``gpus`` in the ATOM image with the tree importable,
+        as ``rl-<issue>-<role>``; its name."""
         for g in gpus:
             if g < self._next_gpu:
                 raise HarnessError(f"trainer GPU {g} is already a worker's")
         self.refuse_busy(gpus)
         self._next_gpu = max(self._next_gpu, max(gpus) + 1)
-        return self.container("trainer", ATOM_IMAGE, argv, gpus, TREE_FLAGS)
+        return self.container(role, ATOM_IMAGE, argv, gpus, TREE_FLAGS)
 
     # -- ATOMesh -----------------------------------------------------------
 
