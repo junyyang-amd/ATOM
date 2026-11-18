@@ -4572,15 +4572,26 @@ class Scheduler:
                 seq.required_channel_state = seq.required_channel.advance(
                     seq.required_channel_state, token_ids
                 )
+            injected = getattr(seq, "_injected_t0", None) is not None
             token_logprob = None
             if token_logprobs is not None and seq.return_logprobs:
                 token_logprob = token_logprobs.get(seq.id)
+                if injected and token_logprob is not None:
+                    # P sampled T0 and sent its record with the handoff. A
+                    # record not shaped like D's own counts as missing.
+                    first = (seq.kv_transfer_params or {}).get("first_token_logprob")
+                    token_logprob = (
+                        [tuple(first), *token_logprob]
+                        if isinstance(first, list)
+                        and token_logprob
+                        and len(first) == len(token_logprob[0])
+                        else None
+                    )
 
             # Check before mutating tokens. A malformed payload must terminate
             # only its request, never escape into the engine's main loop.
             if seq.return_logprobs and (
-                getattr(seq, "_injected_t0", None) is not None
-                or len(token_logprob or ()) != num_new_token
+                len(token_logprob or ()) != num_new_token + injected
             ):
                 logger.error("Missing or misaligned logprobs for request %s", seq.id)
                 self._mark_finished(
@@ -4816,7 +4827,7 @@ class Scheduler:
             if leave_reason is not None:
                 # Publish transfer metadata before constructing the terminal
                 # output. Aborts without sampled output use the same helper.
-                self._mark_finished(seq, leave_reason, num_tokens)
+                self._mark_finished(seq, leave_reason, num_tokens, committed_logprobs)
 
             # Prepare stream output
             # A terminal event is required even when truncation leaves no
@@ -4961,7 +4972,8 @@ class Scheduler:
         )
         return finished_seqs
 
-    def _mark_finished(self, seq, reason, num_tokens):
+    def _mark_finished(self, seq, reason, num_tokens, logprobs=None):
+        """`logprobs` are the records this step committed, if it committed any."""
         tracing.finish(seq, reason=reason, num_tokens=num_tokens)
         # Set the reason before the connector decides whether to claim the
         # source blocks. This runs exactly once, including early cancellation
@@ -4972,12 +4984,13 @@ class Scheduler:
             if callable(callback):
                 callback(seq)
             handoff = getattr(seq, "kv_transfer_params_output", None)
-            if (
-                self.stamps_handoffs
-                and handoff is not None
-                and self._connector_flag("is_producer")
-            ):
-                handoff["weight_version"] = self.weight_version
+            if handoff is not None and self._connector_flag("is_producer"):
+                if self.stamps_handoffs:
+                    handoff["weight_version"] = self.weight_version
+                # D injects P's first token; it needs that token's record too.
+                # This step committed the first token iff it committed them all.
+                if logprobs and len(seq.logprobs) == len(logprobs):
+                    handoff["first_token_logprob"] = list(logprobs[0])
             if reason == "aborted":
                 self._connector_abort_send(seq)
         seq.num_tokens = num_tokens
