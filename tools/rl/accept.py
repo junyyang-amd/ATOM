@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RL acceptance checks on pit2-p03-g48.
 
-    python3 tools/rl/accept.py <check> [--dry-run]
+    python3 tools/rl/accept.py <check> [--dry-run] [--smg <SMG checkout>]
 
 Runs ``checks/<check>.py``, which exports ``ISSUE`` (its containers are named
 ``rl-<ISSUE>-<role>``), ``plan(h) -> list[str]`` (what ``--dry-run`` prints)
@@ -42,6 +42,7 @@ ATOM_IMAGE = "rocm/atom-dev:nightly_202611081546"
 # lmsysorg/sglang-rocm is untagged on the node; this is its image id.
 SGLANG_IMAGE = "sha256:2456fff6cfaffb822026d089a0629a4859c84d2448864ffd6d5fa4f945ef2c86"
 MESH_IMAGE = "atom-gate:local"
+SMG_DIR = "/share_nfs/junyan_tmp_r120/rl/ref/smg"
 FIRST_PORT = 18200
 GPU_COUNT = 8
 GPU_BUSY_MB = 1024
@@ -201,9 +202,12 @@ class Harness:
         if max(gpus) >= GPU_COUNT:
             raise HarnessError(f"needs GPU {max(gpus)}; the node has {GPU_COUNT}")
         if not self.dry_run:
+            # HIP numbers GPUs in KFD node order, amd-smi by PCI bus.
+            listed = json.loads(self.sh(["amd-smi", "list", "--json"]))
+            smi = [r["gpu"] for r in sorted(listed, key=lambda r: r["node_id"])]
             rows = json.loads(self.sh(["amd-smi", "monitor", "-v", "--json"]))
             used = {r["gpu"]: r["vram_used"]["value"] for r in rows}
-            busy = [g for g in gpus if used.get(g, 0) > GPU_BUSY_MB]
+            busy = [g for g in gpus if used.get(smi[g], 0) > GPU_BUSY_MB]
             if busy:
                 raise HarnessError(f"GPU {busy} busy (> {GPU_BUSY_MB} MB in use)")
 
@@ -600,17 +604,19 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--dry-run", action="store_true", help="print the steps; run nothing"
     )
+    ap.add_argument("--smg", default=SMG_DIR, help="SMG checkout that smg_client runs")
     ap.add_argument("--tree-digest", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     sys.modules.setdefault("accept", sys.modules[__name__])
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     check = importlib.import_module(f"checks.{args.check}")
     h = Harness(check.ISSUE, dry_run=args.dry_run)
+    h.smg = args.smg
     if args.dry_run:
         print("\n".join(check.plan(h)))
         return 0
     if socket.gethostname() != NODE_HOST:
-        rerun = ["python3", "tools/rl/accept.py", args.check]
+        rerun = ["python3", "tools/rl/accept.py", args.check, "--smg", args.smg]
         rerun += ["--tree-digest", tree_digest()]
         remote = f"cd {shlex.quote(str(TREE))} && {shlex.join(rerun)}"
         ssh = ["ssh", "-o", "BatchMode=yes", NODE, remote]
