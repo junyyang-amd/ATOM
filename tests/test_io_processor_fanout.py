@@ -151,13 +151,10 @@ def test_rapidserve_logprob_admission(n, rapidserve, logprobs):
         assert all(s.return_logprobs == logprobs for s in seqs)
 
 
-@pytest.mark.parametrize("configured", [False, True])
-def test_pd_logprobs_rejected_before_tokenization(configured):
+def test_chunked_pd_logprobs_rejected_before_tokenization():
     proc = _make_processor()
-    if configured:
-        proc.config.kv_transfer_config = object()
-    kwargs = {} if configured else {"kv_transfer_params": {"remote": True}}
-    with pytest.raises(ValueError, match="P/D"):
+    kwargs = {"kv_transfer_params": {"chunked_transfer": True}}
+    with pytest.raises(ValueError, match="chunked P/D"):
         proc.preprocess_fanout("hello", SamplingParams(logprobs=True), **kwargs)
     proc.tokenizer.encode.assert_not_called()
     assert not proc.requests
