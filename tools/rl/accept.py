@@ -202,9 +202,12 @@ class Harness:
         if max(gpus) >= GPU_COUNT:
             raise HarnessError(f"needs GPU {max(gpus)}; the node has {GPU_COUNT}")
         if not self.dry_run:
+            # HIP numbers GPUs in KFD node order, amd-smi by PCI bus.
+            listed = json.loads(self.sh(["amd-smi", "list", "--json"]))
+            smi = [r["gpu"] for r in sorted(listed, key=lambda r: r["node_id"])]
             rows = json.loads(self.sh(["amd-smi", "monitor", "-v", "--json"]))
             used = {r["gpu"]: r["vram_used"]["value"] for r in rows}
-            busy = [g for g in gpus if used.get(g, 0) > GPU_BUSY_MB]
+            busy = [g for g in gpus if used.get(smi[g], 0) > GPU_BUSY_MB]
             if busy:
                 raise HarnessError(f"GPU {busy} busy (> {GPU_BUSY_MB} MB in use)")
 

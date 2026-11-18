@@ -163,3 +163,25 @@ def test_smg_client_refuses_another_smg_commit(on_node, tmp_path, monkeypatch, c
         f"FAIL smg_client: HarnessError: {tmp_path / 'smg'} is at {head}; "
         f"the check runs SMG {smg_client.SMG_COMMIT} unmodified"
     )
+
+
+# g48's GPUs: amd-smi's index (PCI bus order) and KFD node, from `amd-smi list`.
+G48_NODES = {0: 3, 1: 5, 2: 4, 3: 2, 4: 7, 5: 9, 6: 8, 7: 6}
+
+
+@pytest.mark.parametrize("hip,busy", [(0, True), (1, False), (3, False)])
+def test_a_busy_gpu_is_found_by_its_hip_index(monkeypatch, hip, busy):
+    """amd-smi's GPU 3 is HIP's GPU 0: HIP numbers GPUs in KFD node order."""
+    listed = [{"gpu": g, "node_id": n} for g, n in G48_NODES.items()]
+    rows = [
+        {"gpu": g, "vram_used": {"value": 250000 if g == 3 else 283}} for g in G48_NODES
+    ]
+    h = accept.Harness(108)
+    monkeypatch.setattr(
+        h, "sh", lambda argv: json.dumps(listed if "list" in argv else rows)
+    )
+    if busy:
+        with pytest.raises(accept.HarnessError, match=rf"GPU \[{hip}\] busy"):
+            h.refuse_busy([hip])
+    else:
+        h.refuse_busy([hip])
