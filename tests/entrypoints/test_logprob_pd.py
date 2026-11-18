@@ -112,8 +112,13 @@ def test_d_answers_ps_record_then_its_own(
     assert list(seq.logprobs) == [-0.25, -0.75, -0.75]
 
 
-def test_d_without_ps_record_ends_only_that_request(build):
-    sched, seq = _consumer(build, {"first_token_id": 5})
+@pytest.mark.parametrize(
+    "record",
+    [{}, {"first_token_logprob": 5}, {"first_token_logprob": []}],
+    ids=["missing", "scalar", "narrower"],
+)
+def test_d_without_ps_record_ends_only_that_request(build, record):
+    sched, seq = _consumer(build, {"first_token_id": 5, **record})
 
     output = _step(sched, seq, 10, D_RECORD)
 

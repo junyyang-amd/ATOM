@@ -4577,10 +4577,15 @@ class Scheduler:
             if token_logprobs is not None and seq.return_logprobs:
                 token_logprob = token_logprobs.get(seq.id)
                 if injected and token_logprob is not None:
-                    # P sampled T0 and sent its record with the handoff.
+                    # P sampled T0 and sent its record with the handoff. A
+                    # record not shaped like D's own counts as missing.
                     first = (seq.kv_transfer_params or {}).get("first_token_logprob")
                     token_logprob = (
-                        None if first is None else [tuple(first), *token_logprob]
+                        [tuple(first), *token_logprob]
+                        if isinstance(first, list)
+                        and token_logprob
+                        and len(first) == len(token_logprob[0])
+                        else None
                     )
 
             # Check before mutating tokens. A malformed payload must terminate

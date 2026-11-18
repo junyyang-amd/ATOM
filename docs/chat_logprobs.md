@@ -41,10 +41,14 @@ logprob arrays contain committed tokens only, not speculative placeholders.
   error rather than inventing UTF-8 bytes. The intended V4.1 tokenizer is ByteLevel.
 - Text and thinking output, streaming/non-streaming, and multiple choices are
   included. Normal tool requests are supported; probability fields describe
-  visible content/reasoning, not tool arguments. Multimodal input and P/D KV
-  transfer with logprobs are rejected. Their existing behavior is retained when
-  logprobs is disabled. RapidServe requests with logprobs are also rejected before
-  inference: its prefill handoff transfers the first token without its probability.
+  visible content/reasoning, not tool arguments. Multimodal input and chunked
+  P/D KV transfer with logprobs are rejected. Their existing behavior is retained
+  when logprobs is disabled. A non-chunked P/D pair is supported: P publishes its
+  first token's record with the handoff (`first_token_logprob`), and D answers
+  that record ahead of the tokens it decodes. A D that receives no well-formed
+  record ends only that request, with `logprob_error`. RapidServe requests with
+  logprobs are also rejected before inference: its prefill handoff transfers the
+  first token without its probability.
   No image implementation is added.
 - Forced synthetic acceptance is rejected. It cannot validate target-model
   semantics or token probabilities.
