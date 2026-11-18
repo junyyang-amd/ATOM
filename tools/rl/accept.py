@@ -384,14 +384,21 @@ class Harness:
             self.wait_ready(name, url)
         return [url for _, url in started]
 
-    def start_trainer(self, gpus: list[int], argv: list[str]) -> str:
-        """Run ``argv`` on ``gpus`` in the ATOM image with the tree importable; its name."""
+    def start_trainer(
+        self, gpus: list[int], argv: list[str], role="trainer", peers=()
+    ) -> str:
+        """Run ``argv`` on ``gpus`` in the ATOM image with the tree importable,
+        as ``rl-<issue>-<role>``; its name. ``peers`` (GPUs of the workers it
+        joins a process group with) are visible after ``gpus``: RCCL opens a
+        peer's P2P buffer on the device with the peer's own local index, so a
+        trainer seeing fewer GPUs than a TP worker fails its first collective
+        with HIP 'invalid argument'."""
         for g in gpus:
             if g < self._next_gpu:
                 raise HarnessError(f"trainer GPU {g} is already a worker's")
         self.refuse_busy(gpus)
         self._next_gpu = max(self._next_gpu, max(gpus) + 1)
-        return self.container("trainer", ATOM_IMAGE, argv, gpus, TREE_FLAGS)
+        return self.container(role, ATOM_IMAGE, argv, [*gpus, *peers], TREE_FLAGS)
 
     # -- ATOMesh -----------------------------------------------------------
 
@@ -603,7 +610,9 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--dry-run", action="store_true", help="print the steps; run nothing"
     )
-    ap.add_argument("--smg", default=SMG_DIR, help="SMG checkout that smg_client runs")
+    ap.add_argument(
+        "--smg", default=SMG_DIR, help="SMG checkout whose scripts the checks run"
+    )
     ap.add_argument("--tree-digest", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     sys.modules.setdefault("accept", sys.modules[__name__])
