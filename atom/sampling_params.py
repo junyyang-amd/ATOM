@@ -178,8 +178,8 @@ class SamplingParams:
             return
         if getattr(config, "enable_rapidserve", False):
             raise ValueError("logprobs is unavailable with RapidServe")
-        if kv_transfer or getattr(config, "kv_transfer_config", None):
-            raise ValueError("logprobs is unavailable with P/D transfer")
+        if (kv_transfer or {}).get("chunked_transfer"):
+            raise ValueError("logprobs is unavailable with chunked P/D transfer")
         if multimodal:
             raise ValueError("Chat logprobs currently supports text input only")
         spec = getattr(config, "speculative_config", None)

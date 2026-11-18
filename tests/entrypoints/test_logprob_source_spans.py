@@ -493,9 +493,8 @@ def test_bad_raw_registration_preserves_other_buffered_chunks():
     "option,value,kwargs",
     [
         ("enable_rapidserve", True, {}),
-        ("kv_transfer_config", object(), {}),
         ("speculative_config", SimpleNamespace(synthetic_acceptance_rates=[]), {}),
-        ("unused", None, {"kv_transfer": {"id": 1}}),
+        ("unused", None, {"kv_transfer": {"chunked_transfer": True}}),
         ("unused", None, {"multimodal": True}),
     ],
 )
