@@ -53,7 +53,10 @@ def test_dry_run_plans_each_row_worker_trainer_then_fresh(models, monkeypatch, c
     ]
     trainer = shlex.split(next(s for s in steps if "rl-110-trainer-tp2" in s))
     script = trainer[trainer.index("python3") :]
-    assert script[:2] == ["python3", refit_trainer.SCRIPT]
+    assert script[:2] == [
+        "python3",
+        f"{accept.SMG_DIR}/examples/rl/refit_from_trainer.py",
+    ]
     args = dict(zip(script[2::2], script[3::2]))
     assert args["--smg"] == "http://127.0.0.1:18209"
     assert args["--selector"] == "engine=atom"
@@ -104,7 +107,7 @@ def fake_trainer(exit_code=0, stale=(), drift=None, running=False, tp_size=None)
             return f"rl-110-{role}"
 
         def sh(self, argv, check=True):
-            if argv[:3] == ["git", "-C", refit_trainer.SMG]:
+            if argv[:3] == ["git", "-C", accept.SMG_DIR]:
                 return refit_trainer.SMG_COMMIT if "rev-parse" in argv else ""
             if argv[:2] == ["docker", "inspect"]:
                 return "true 0" if running else f"false {exit_code}"
@@ -190,7 +193,7 @@ def test_refit_trainer_refuses_another_smg_commit(on_node, monkeypatch, capsys):
 
     code, out = _run(monkeypatch, capsys, "refit_trainer", Moved)
     assert code == 1 and out.startswith(
-        f"FAIL refit_trainer: {refit_trainer.SMG} is at 0000"
+        f"FAIL refit_trainer: {accept.SMG_DIR} is at 0000"
     )
 
 

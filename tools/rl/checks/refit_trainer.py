@@ -2,15 +2,15 @@
 
 Each row: one ``--enable-rl`` ATOM worker on OLD at the row's TP behind
 ATOMesh, and SMG's ``examples/rl/refit_from_trainer.py``, run unmodified from
-the checkout at SMG_COMMIT with ``--selector engine=atom``, as the trainer on
-the next GPU. It loads NEW, lays out ranks from ``GET /v1/rl/workers``
-``tp_size``, pauses, has each worker join the weight-update group, broadcasts
-NEW in chunks (the last carries the version and ``flush_cache``), destroys
-the group, continues and checks each worker's ``model_info`` version. The
-trainer must exit within TRAINER_DEADLINE_S, so a refused update fails the
-check instead of leaving the broadcast waiting. Then the fixed prompts on
-the worker's ``/generate``, compared teacher-forced with a fresh worker on NEW
-at the same TP (``Harness.equals_fresh``).
+the checkout ``--smg`` names (at SMG_COMMIT) with ``--selector engine=atom``,
+as the trainer on the next GPU. It loads NEW, lays out ranks from ``GET
+/v1/rl/workers`` ``tp_size``, pauses, has each worker join the weight-update
+group, broadcasts NEW in chunks (the last carries the version and
+``flush_cache``), destroys the group, continues and checks each worker's
+``model_info`` version. The trainer must exit within TRAINER_DEADLINE_S, so a
+refused update fails the check instead of leaving the broadcast waiting. Then
+the fixed prompts on the worker's ``/generate``, compared teacher-forced with
+a fresh worker on NEW at the same TP (``Harness.equals_fresh``).
 
 PASS when, in every row, the trainer exits 0 and the outputs report the new
 version and equal fresh. Each row records its refit time: from the trainer's
@@ -26,9 +26,7 @@ import time
 from accept import NODE_IP, PROMPTS, HarnessError, Verdict
 
 ISSUE = 110
-SMG = "/share_nfs/junyan_tmp_r120/rl/ref/smg"
 SMG_COMMIT = "6c7bda118c5c6c02e65fe104cc8d93a0f906c965"
-SCRIPT = f"{SMG}/examples/rl/refit_from_trainer.py"
 SELECTOR = "engine=atom"
 VERSION = "refit-trainer-v2"
 # name: (tp, OLD, NEW, the trainer's GPU). Workers take GPUs from 0 upward, so
@@ -49,21 +47,21 @@ FRESH_COMPARE = "POST <fresh>/v1/chat/completions per output token, teacher-forc
 
 def smg_problem(h) -> str | None:
     """Why the SMG checkout is not the pinned, unmodified one, or None."""
-    head = h.sh(["git", "-C", SMG, "rev-parse", "HEAD"], check=False).strip()
+    head = h.sh(["git", "-C", h.smg, "rev-parse", "HEAD"], check=False).strip()
     if head != SMG_COMMIT:
-        return f"{SMG} is at {head or 'no commit'}, not {SMG_COMMIT}"
-    if h.sh(["git", "-C", SMG, "status", "--porcelain"], check=False).strip():
-        return f"{SMG} has local changes"
+        return f"{h.smg} is at {head or 'no commit'}, not {SMG_COMMIT}"
+    if h.sh(["git", "-C", h.smg, "status", "--porcelain"], check=False).strip():
+        return f"{h.smg} has local changes"
     return None
 
 
-def trainer_argv(mesh_url: str, checkpoint: str, port: int) -> list[str]:
+def trainer_argv(smg: str, mesh_url: str, checkpoint: str, port: int) -> list[str]:
     return [
         "env",
-        f"PYTHONPATH={SMG}/bindings/python/src",
+        f"PYTHONPATH={smg}/bindings/python/src",
         "PYTHONUNBUFFERED=1",  # the log timestamps time the refit
         "python3",
-        SCRIPT,
+        f"{smg}/examples/rl/refit_from_trainer.py",
         "--smg",
         mesh_url,
         "--model-path",
@@ -89,12 +87,12 @@ def launch_worker(h, tp: int, old: str) -> str:
 
 
 def start_trainer(h, tp: int, new: str, gpu: int) -> str:
-    argv = trainer_argv(h.mesh_url, h.model_dir(new), h.take_port())
+    argv = trainer_argv(h.smg, h.mesh_url, h.model_dir(new), h.take_port())
     return h.start_trainer([gpu], argv, role=f"trainer-tp{tp}")
 
 
 def plan(h) -> list[str]:
-    steps = [f"git -C {SMG} rev-parse HEAD: {SMG_COMMIT}, no local changes"]
+    steps = [f"git -C {h.smg} rev-parse HEAD: {SMG_COMMIT}, no local changes"]
     for tp, old, new, gpu in ROWS.values():
         h.steps.clear()
         worker = launch_worker(h, tp, old)
