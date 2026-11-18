@@ -145,8 +145,10 @@ def plan(h) -> list[str]:
     ]
     steps = [
         *h.steps,
-        f"POST {mesh}/v1/completions x{IN_FLIGHT} at once, streamed, "
-        f"max_tokens {LOAD_TOKENS}; once {PAUSE_AFTER} have a token:",
+        (
+            f"POST {mesh}/v1/completions x{IN_FLIGHT} at once, streamed, "
+            f"max_tokens {LOAD_TOKENS}; once {PAUSE_AFTER} have a token:"
+        ),
         *calls,
         f"GET {p}/model_info, GET {d}/model_info",
         f"POST {mesh}/v1/chat/completions x{len(PROMPTS)}, one at a time",
