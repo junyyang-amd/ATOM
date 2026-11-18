@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RL acceptance checks on pit2-p03-g24.
+"""RL acceptance checks on pit2-p03-g48.
 
     python3 tools/rl/accept.py <check> [--dry-run]
 
@@ -31,9 +31,9 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-NODE = "junyan.yang@amd.com@pit2-p03-g24"
-NODE_HOST = "pit2-p03-g24"
-NODE_IP = "10.19.0.124"
+NODE = "junyan.yang@amd.com@pit2-p03-g48"
+NODE_HOST = "pit2-p03-g48"
+NODE_IP = "10.19.0.148"
 TREE = Path(__file__).resolve().parents[2]
 OUT_DIR = Path("/share_nfs/junyan_tmp_r120/rl-accept")
 HF_HOME = "/share_nfs/junyan_tmp_r120/hf"
@@ -75,6 +75,11 @@ _FORMS += ["Tell a story about"]
 # 32 fixed prompts for "equals fresh": temperature 0, 64 new tokens, one at a time.
 PROMPTS = [f"{form} {topic}." for form in _FORMS for topic in _TOPICS]
 SAMPLING = {"temperature": 0, "max_new_tokens": 64}
+# ATOM's greedy output does not repeat on one server (near-ties flip), so an
+# output equals fresh when each of its tokens, given the tokens before it, is
+# within FRESH_MARGIN nats of the fresh server's top token.
+FRESH_MARGIN = 0.5
+TOP_LOGPROBS = 20  # the most ATOM's chat route returns
 
 
 class HarnessError(RuntimeError):
@@ -129,6 +134,32 @@ def wait_for_tree(want: str | None) -> None:
     raise HarnessError(f"{NODE_HOST} still sees a different tree after 90 s")
 
 
+def _byte_level_chars() -> dict[str, int]:
+    """The byte each character of a byte-level BPE vocabulary stands for."""
+    kept = [*range(ord("!"), ord("~") + 1), *range(0xA1, 0xAD), *range(0xAE, 0x100)]
+    moved = [b for b in range(256) if b not in kept]
+    chars = {chr(b): b for b in kept}
+    chars |= {chr(256 + n): b for n, b in enumerate(moved)}
+    return chars
+
+
+def token_bytes(checkpoint: str) -> tuple[dict[int, bytes], set[int]]:
+    """Each token id of ``checkpoint``'s tokenizer spelled in bytes, as ATOM's
+    chat logprobs spell it, and the special ids that route leaves out."""
+    tok = json.loads(Path(checkpoint, "tokenizer.json").read_text())
+    vocab = dict(tok["model"]["vocab"])
+    vocab |= {added["content"]: added["id"] for added in tok["added_tokens"]}
+    chars = _byte_level_chars()
+    spelling = {}
+    for text, token in vocab.items():
+        try:
+            spelling[token] = bytes(chars[c] for c in text)
+        except KeyError:
+            spelling[token] = text.encode()
+    hidden = {added["id"] for added in tok["added_tokens"] if added["special"]}
+    return spelling, hidden
+
+
 class Harness:
     """Containers, ports and GPUs of one check, and the calls a check makes.
 
@@ -144,6 +175,7 @@ class Harness:
         self.mesh_url: str | None = None
         self._next_gpu, self._next_port = 0, FIRST_PORT
         self._mesh_built = False
+        self._fresh_tops: dict[tuple, dict[bytes, float]] = {}
         self._user = f"{os.getuid()}:{os.getgid()}"
 
     # -- processes ---------------------------------------------------------
@@ -479,11 +511,72 @@ class Harness:
             out.append(body)
         return out
 
-    def equals_fresh(self, checkpoint: str, outputs: list[dict], launch) -> bool:
-        """Whether ``outputs`` (``generate`` over ``PROMPTS``) have the token ids
-        of a fresh server ``launch(checkpoint)`` starts and returns the URL of."""
-        fresh = self.generate(launch(checkpoint), PROMPTS[: len(outputs)])
-        return [o["output_ids"] for o in outputs] == [f["output_ids"] for f in fresh]
+    def equals_fresh(
+        self, url: str, checkpoint: str, prompts: list[str], outputs: list[dict]
+    ) -> dict:
+        """Teacher-forced compare of ``outputs`` (``generate`` over ``prompts``)
+        with the fresh server at ``url`` on ``checkpoint``: each output token,
+        given the prompt and the output tokens before it, is within
+        FRESH_MARGIN of that server's top token. Answers ``equal``, ``first``
+        (the first token outside the margin, or None), the largest ``gap``
+        seen and the ``margin``."""
+        spelling, hidden = token_bytes(checkpoint)
+        gap = 0.0
+        for i, (prompt, out) in enumerate(zip(prompts, outputs, strict=True)):
+            ids = self.prompt_ids(url, prompt)
+            for t, token in enumerate(out["output_ids"]):
+                top = self.fresh_top(url, ids + out["output_ids"][:t])
+                if not top:  # the fresh top token is one the chat route hides
+                    behind = 0.0 if token in hidden else None
+                else:
+                    mine = top.get(spelling.get(token))
+                    behind = None if mine is None else max(top.values()) - mine
+                if behind is not None and behind <= FRESH_MARGIN:
+                    gap = max(gap, behind)
+                    continue
+                why = "not in its top" if behind is None else f"{behind:.3f} below"
+                first = f"prompt {i} {prompt[:40]!r} token {t} ({token}): {why}"
+                return {
+                    "equal": False,
+                    "first": first,
+                    "gap": gap,
+                    "margin": FRESH_MARGIN,
+                }
+        return {"equal": True, "first": None, "gap": gap, "margin": FRESH_MARGIN}
+
+    def prompt_ids(self, url: str, prompt: str) -> list[int]:
+        """``prompt``'s token ids as the server at ``url`` tokenizes text."""
+        body = {"prompt": prompt, "max_tokens": 1, "return_token_ids": True}
+        status, answer = http("POST", url + "/v1/completions", body)
+        if status != 200:
+            raise HarnessError(f"/v1/completions on {url} answered {status}: {answer}")
+        return answer["prompt_token_ids"]
+
+    def fresh_top(self, url: str, ids: list[int]) -> dict[bytes, float]:
+        """The server's top next tokens after ``ids``, by their bytes, with
+        their logprobs; empty when its top token is one the chat route hides.
+        Asked once per ``(url, ids)``."""
+        key = (url, tuple(ids))
+        if key not in self._fresh_tops:
+            body = {
+                "messages": [{"role": "user", "content": "-"}],
+                "prompt_token_ids": ids,
+                "max_tokens": 1,
+                "temperature": 0,
+                "logprobs": True,
+                "top_logprobs": TOP_LOGPROBS,
+            }
+            status, answer = http("POST", url + "/v1/chat/completions", body)
+            if status != 200:
+                raise HarnessError(f"chat on {url} answered {status}: {answer}")
+            fields = answer["choices"][0]["logprobs"] or {}
+            self._fresh_tops[key] = {
+                bytes(top["bytes"]): top["logprob"]
+                for entries in fields.values()
+                for entry in entries
+                for top in entry["top_logprobs"]
+            }
+        return self._fresh_tops[key]
 
     def write_result(self, check: str, verdict: Verdict, elapsed_s: float) -> Path:
         dirty = bool(_git("status", "--porcelain").strip())

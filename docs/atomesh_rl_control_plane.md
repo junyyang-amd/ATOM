@@ -74,7 +74,7 @@ sequenceDiagram
     H->>M: POST /generate per worker (32 prompts)
     M->>A: POST /generate
     A-->>H: {text, output_ids, meta_info.weight_version}
-    Note over H: PASS when versions are new and output_ids equal a fresh server on the new checkpoint
+    Note over H: PASS when versions are new and the outputs equal fresh on the new checkpoint
 ```
 
 ### A3: refit from a trainer over RCCL (goal 5)
@@ -516,14 +516,27 @@ own issue; D11 does not depend on the transport.
 ### D15. Acceptance harness
 
 One `tools/rl/accept.py` with a subcommand per check. Each starts its own
-workers and ATOMesh on g24 in containers named `rl-<issue>-<role>`, compares
+workers and ATOMesh on g48 in containers named `rl-<issue>-<role>`, compares
 against a fresh server (or fresh 1P1D) on the same checkpoint with the same
 settings and prompts, writes `/share_nfs/junyan_tmp_r120/rl-accept/<check>.json`,
 prints `PASS <check>` or `FAIL <check>: <reason>` and exits 0 only on PASS.
 
+An output equals fresh when it is teacher-forced equal (`Harness.equals_fresh`):
+for each output token, the fresh server, given the prompt and the output tokens
+before it, ranks that token within a fixed logprob margin
+(`accept.py: FRESH_MARGIN`) of its own top token. The fresh server is asked
+through its chat route (`prompt_token_ids`, `max_tokens` 1, `top_logprobs`);
+a position whose top token that route hides (a special token) matches only a
+special output token. The result names the first token outside the margin and
+records the largest gap seen.
+
 - Basis: #76 Acceptance fixes the command, path and verdict line.
   principle: correctness is compared against a fresh server; unit tests run
-  without a GPU.
+  without a GPU. data: one ATOM TP1 server at temperature 0 differs from
+  itself on 15 to 22 of 32 prompts, because near-tied tokens flip from run
+  to run (PR #125); [Ruling on #107](https://github.com/junyyang-amd/ATOM/issues/107#issuecomment-6967045847).
+- Rejected: identical token ids against one fresh run. They fail a correct
+  refit whenever a near-tie flips.
 - Rejected: a pytest GPU suite. The gate is CPU-only, and the requirement
   names the command.
 
