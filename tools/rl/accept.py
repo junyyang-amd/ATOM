@@ -528,15 +528,16 @@ class Harness:
         """Teacher-forced compare of ``outputs`` (``generate`` over ``prompts``)
         with the fresh server at ``url`` on ``checkpoint``: each output token,
         given the prompt and the output tokens before it, is within
-        FRESH_MARGIN of that server's top token. Answers ``equal``, ``first``
-        (the first token outside the margin, or None), the largest ``gap``
-        seen and the ``margin``."""
+        FRESH_MARGIN of that server's top token. Each request names
+        ``checkpoint`` as its model, as ATOMesh routes by model. Answers
+        ``equal``, ``first`` (the first token outside the margin, or None),
+        the largest ``gap`` seen and the ``margin``."""
         spelling, hidden = token_bytes(checkpoint)
         gap = 0.0
         for i, (prompt, out) in enumerate(zip(prompts, outputs, strict=True)):
-            ids = self.prompt_ids(url, prompt)
+            ids = self.prompt_ids(url, checkpoint, prompt)
             for t, token in enumerate(out["output_ids"]):
-                top = self.fresh_top(url, ids + out["output_ids"][:t])
+                top = self.fresh_top(url, checkpoint, ids + out["output_ids"][:t])
                 if not top:  # the fresh top token is one the chat route hides
                     behind = 0.0 if token in hidden else None
                 else:
@@ -555,21 +556,27 @@ class Harness:
                 }
         return {"equal": True, "first": None, "gap": gap, "margin": FRESH_MARGIN}
 
-    def prompt_ids(self, url: str, prompt: str) -> list[int]:
+    def prompt_ids(self, url: str, model: str, prompt: str) -> list[int]:
         """``prompt``'s token ids as the server at ``url`` tokenizes text."""
-        body = {"prompt": prompt, "max_tokens": 1, "return_token_ids": True}
+        body = {
+            "model": model,
+            "prompt": prompt,
+            "max_tokens": 1,
+            "return_token_ids": True,
+        }
         status, answer = http("POST", url + "/v1/completions", body)
         if status != 200:
             raise HarnessError(f"/v1/completions on {url} answered {status}: {answer}")
         return answer["prompt_token_ids"]
 
-    def fresh_top(self, url: str, ids: list[int]) -> dict[bytes, float]:
+    def fresh_top(self, url: str, model: str, ids: list[int]) -> dict[bytes, float]:
         """The server's top next tokens after ``ids``, by their bytes, with
         their logprobs; empty when its top token is one the chat route hides.
         Asked once per ``(url, ids)``."""
         key = (url, tuple(ids))
         if key not in self._fresh_tops:
             body = {
+                "model": model,
                 "messages": [{"role": "user", "content": "-"}],
                 "prompt_token_ids": ids,
                 "max_tokens": 1,
