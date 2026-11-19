@@ -494,7 +494,8 @@ impl InferenceEnvelope {
             .submit(deadline, move |ctx| -> Result<Self, IngressError> {
                 let mut request = parse()?;
                 if let Some(routing) = routing {
-                    request.routed = Some(routing.prepare(&request.parsed, ctx)?);
+                    let metadata = request.metadata.clone();
+                    request.routed = Some(routing.prepare_from(&request.parsed, metadata, ctx)?);
                     request.dp_rank_body = routing.dp_rank_body(&request.metadata, &request.body);
                 }
                 Ok(request)
@@ -539,7 +540,8 @@ impl InferenceEnvelope {
         }
         let routing = routing.clone();
         self.prepare(pool, move |request, ctx| {
-            routing.prepare_text_and_tokens(&request.parsed, tokens, ctx)
+            let media_count = request.metadata.media_count;
+            routing.prepare_text_and_tokens(&request.parsed, media_count, tokens, ctx)
         })
         .await
     }
@@ -697,13 +699,23 @@ impl IngressRouting {
         parsed: &ParsedInference,
         ctx: &JobContext,
     ) -> Result<RoutingPreparation, IngressError> {
+        self.prepare_from(parsed, parsed.metadata_with_text(false), ctx)
+    }
+
+    /// [`Self::prepare`] from `parsed`'s text-free `metadata`, whose media
+    /// count it reuses.
+    fn prepare_from(
+        &self,
+        parsed: &ParsedInference,
+        metadata: InferenceMetadata,
+        ctx: &JobContext,
+    ) -> Result<RoutingPreparation, IngressError> {
         ctx.check()?;
-        let metadata = parsed.metadata_with_text(false);
         let (needs_text, tokens) = self.admit(&metadata)?;
         if !needs_text && tokens == Tokens::Unused {
             return Ok((metadata, None));
         }
-        self.prepare_text_and_tokens(parsed, tokens, ctx)
+        self.prepare_text_and_tokens(parsed, metadata.media_count, tokens, ctx)
     }
 
     /// Validate the API and topology, then return whether the policy needs
@@ -719,10 +731,11 @@ impl IngressRouting {
     fn prepare_text_and_tokens(
         &self,
         parsed: &ParsedInference,
+        media_count: usize,
         tokens: Tokens,
         ctx: &JobContext,
     ) -> Result<RoutingPreparation, IngressError> {
-        let (metadata, routed) = parsed.routing_metadata(self.front_media_digest);
+        let (metadata, routed) = parsed.routing_metadata(media_count, self.front_media_digest);
         let routed = routed.as_ref();
         let tokens = match tokens {
             Tokens::Needed { wanted } => Some(self.tokens(parsed, routed, &metadata, ctx, wanted)?),

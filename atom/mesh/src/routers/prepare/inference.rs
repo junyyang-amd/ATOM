@@ -97,13 +97,12 @@ fn content(message: &ChatMessage) -> Option<&MessageContent> {
 }
 
 /// A routing copy of `request`'s messages with each image and video replaced in
-/// place by a text digest of its URL, or `None` when it has no media. Routing
-/// text and template tokens otherwise drop media or render it as an
-/// identity-free placeholder, so requests differing only in media would share
-/// a prefix the engine's media-keyed prefix cache never shares.
-fn with_media_digests(request: &ChatCompletionRequest) -> Option<Vec<ChatMessage>> {
-    media_parts(request).next()?;
-    Some(request.messages.iter().map(digested).collect())
+/// place by a text digest of its URL. Routing text and template tokens
+/// otherwise drop media or render it as an identity-free placeholder, so
+/// requests differing only in media would share a prefix the engine's
+/// media-keyed prefix cache never shares.
+fn with_media_digests(request: &ChatCompletionRequest) -> Vec<ChatMessage> {
+    request.messages.iter().map(digested).collect()
 }
 
 /// A copy of `message` with digests in place of its media, which it never copies.
@@ -265,8 +264,9 @@ impl ParsedInference {
     /// Every ingress parses here, so an empty model is rejected for all routers.
     pub fn parse(path: &str, bytes: &[u8]) -> Result<Self, String> {
         let parsed = Self::parse_body(path, bytes)?;
+        // Reads the model only, so the media are left uncounted.
         if parsed
-            .metadata_with_text(false)
+            .metadata_of(0, false)
             .model
             .is_some_and(|model| model.trim().is_empty())
         {
@@ -449,25 +449,22 @@ impl ParsedInference {
     }
 
     /// Routing metadata with its text and, for a chat with media, its
-    /// [`RoutingChat`], built once for both. With `front_digest` (ATOM
-    /// backends), the routing text starts with [`RoutingChat::front`].
+    /// [`RoutingChat`], built once for both. `media_count` is this request's
+    /// [`Self::media_count`], counted once by the caller. With `front_digest`
+    /// (ATOM backends), the routing text starts with [`RoutingChat::front`].
     pub(crate) fn routing_metadata(
         &self,
+        media_count: usize,
         front_digest: bool,
     ) -> (InferenceMetadata, Option<RoutingChat>) {
-        let media_count = self.media_count();
-        let routed = self
-            .chat()
-            .filter(|_| media_count > 0)
-            .and_then(|chat| Some((chat, with_media_digests(chat)?)));
-        let Some((chat, messages)) = routed else {
+        let Some(chat) = self.chat().filter(|_| media_count > 0) else {
             return (self.metadata_of(media_count, true), None);
         };
         let mut metadata = self.metadata_of(media_count, false);
         let front = front_digest.then(|| all_media_digest(chat));
         // The routing text reads only the messages.
         let messages_only = ChatCompletionRequest {
-            messages,
+            messages: with_media_digests(chat),
             ..Default::default()
         };
         metadata.text =
@@ -507,7 +504,7 @@ impl Serialize for RoutingView<'_> {
 impl InferenceRequest for ParsedInference {
     /// The routing metadata vLLM and SGLang backends get.
     fn metadata(&self) -> InferenceMetadata {
-        self.routing_metadata(false).0
+        self.routing_metadata(self.media_count(), false).0
     }
     fn metadata_with_text(&self, include_text: bool) -> InferenceMetadata {
         if include_text {
@@ -641,7 +638,6 @@ mod tests {
     fn text_only_chat_routing_text_is_unchanged() {
         let body = r#"{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},{"role":"assistant","content":"c","reasoning_content":"r"}]}"#;
         let request: ChatCompletionRequest = serde_json::from_str(body).unwrap();
-        assert!(with_media_digests(&request).is_none());
         assert_eq!(chat_routing_text(body), request.extract_text_for_routing());
     }
 
@@ -709,7 +705,7 @@ mod tests {
         let chat = |messages| -> ChatCompletionRequest {
             serde_json::from_value(serde_json::json!({"model": "m", "messages": messages})).unwrap()
         };
-        let digested = with_media_digests(&chat(messages)).unwrap();
+        let digested = with_media_digests(&chat(messages));
         assert_eq!(
             serde_json::to_value(digested).unwrap(),
             serde_json::to_value(chat(expected).messages).unwrap()
