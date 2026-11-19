@@ -440,7 +440,7 @@ async fn pd_ingress_dispatches_next_request_while_prefill_body_is_blocked() {
 /// Through ingress, an ATOM PD router dispatches a text chat chunked when its prefill offers
 /// chunked transfer, but an `image_url` chat through the response relay: decode receives it
 /// only after prefill answers, with no `chunked_transfer` in its `kv_transfer_params`. The
-/// relay needs prefill's handoff: a prefill that answers an image chat without
+/// relay needs prefill's handoff: a prefill that answers an image chat with a null or absent
 /// `kv_transfer_params` gets the chat a 502 and decode never sees it.
 #[tokio::test]
 async fn atom_pd_ingress_relays_an_image_chat_without_chunked_transfer() {
@@ -488,12 +488,16 @@ async fn atom_pd_ingress_relays_an_image_chat_without_chunked_transfer() {
         "cache_seed": 7, "mrope_position_delta": -2});
     let with_handoff = json!({"choices": [], "prompt_token_ids": prompt_ids,
         "kv_transfer_params": handoff});
-    // One that does not hand off answers the image chat without `kv_transfer_params`.
-    let without_handoff = json!({"choices": [], "prompt_token_ids": prompt_ids});
+    // One that does not hand off answers `"kv_transfer_params": null`, as ATOM's prefill does;
+    // an answer without the field is refused alike.
+    let null_handoff = json!({"choices": [], "prompt_token_ids": prompt_ids,
+        "kv_transfer_params": null});
+    let absent_handoff = json!({"choices": [], "prompt_token_ids": prompt_ids});
     for (content, prefill_answer) in [
         (json!([text]), None),
         (json!([text, image]), Some(with_handoff)),
-        (json!([text, image]), Some(without_handoff)),
+        (json!([text, image]), Some(null_handoff)),
+        (json!([text, image]), Some(absent_handoff)),
     ] {
         let body = json!({"model": "pd-ingress-test",
             "messages": [{"role": "user", "content": content}]});

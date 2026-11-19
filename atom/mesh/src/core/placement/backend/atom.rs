@@ -36,8 +36,9 @@ impl AtomAdapter {
     /// Requests with media take the response relay: decode needs the prompt
     /// ids prefill expands from the media and the handoff's `cache_seed`,
     /// which chunked mode starts decode without. ATOM's multimodal prefill
-    /// hands them off only once ROCm/ATOM#3410 lands; before it, the relay
-    /// answers such a request 502 `prefill_missing_kv_transfer_params`.
+    /// hands them off only once ROCm/ATOM#3410 lands; before it, prefill
+    /// answers `kv_transfer_params: null` and the relay answers the request
+    /// 502 `prefill_missing_kv_transfer_params`.
     fn can_chunk_request(body: &Value, carries_media: bool) -> bool {
         if carries_media
             || body.get("n").and_then(Value::as_u64).unwrap_or(1) != 1
