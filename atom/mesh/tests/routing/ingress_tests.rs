@@ -1279,7 +1279,7 @@ async fn tokens_cache_aware_wants_carry_the_special_tokens_in_any_pair() {
                 .unwrap()
                 .unwrap();
             assert_eq!(tokens.as_deref(), Some(want), "kv_events: {kv_events}");
-            assert_eq!(metadata.carries_media, media);
+            assert_eq!(metadata.carries_media(), media);
         }
     }
 }
@@ -1374,7 +1374,7 @@ fn nested_generate_media_counts_the_items_it_holds() {
             .unwrap()
             .metadata_with_text(false);
         assert_eq!(metadata.media_count, count, "{image_data}");
-        assert_eq!(metadata.carries_media, count > 0, "{image_data}");
+        assert_eq!(metadata.carries_media(), count > 0, "{image_data}");
     }
 }
 

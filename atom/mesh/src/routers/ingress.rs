@@ -728,7 +728,7 @@ impl IngressRouting {
             Tokens::Needed { wanted } => Some(self.tokens(parsed, routed, &metadata, ctx, wanted)?),
             // The index cannot match media, and these APIs have no token-routing template.
             Tokens::Wanted
-                if metadata.carries_media
+                if metadata.carries_media()
                     || matches!(
                         parsed,
                         ParsedInference::Messages(_) | ParsedInference::Responses(_)
@@ -840,8 +840,8 @@ impl IngressRouting {
     }
 
     /// The request's `input_ids`, or its prompt encoded, with the tokenizer's special tokens
-    /// when `add_special_tokens`. A chat's prompt is its `routed` copy, when it has one,
-    /// templated, after that copy's `front` digest.
+    /// when `add_special_tokens`. A chat's prompt is templated over its `routed`
+    /// messages, when it has them, after their `front` digest.
     fn tokens(
         &self,
         parsed: &ParsedInference,
@@ -881,14 +881,18 @@ impl IngressRouting {
         }
         ctx.check()?;
         let template_started = Instant::now();
-        let prompt = if let Some(chat) = routed.map(|routed| &routed.chat).or(parsed.chat()) {
+        let prompt = if let Some(chat) = parsed.chat() {
             if self.chats_without_template.read().contains(&entry.id) {
                 return Err(IngressError::new(http::StatusCode::NOT_IMPLEMENTED, "token_routing_unsupported", "this model's chats render with a built-in encoder whose defaults are not the engine's; use a policy that does not require exact tokens"));
             }
-            let mut prompt =
-                super::prepare::chat_template::process_chat_messages(chat, &*entry.tokenizer)
-                    .map_err(IngressError::invalid)?
-                    .text;
+            let messages = routed.map_or(&chat.messages, |routed| &routed.messages);
+            let mut prompt = super::prepare::chat_template::process_chat_messages_as(
+                chat,
+                messages,
+                &*entry.tokenizer,
+            )
+            .map_err(IngressError::invalid)?
+            .text;
             if let Some(front) = routed.and_then(|routed| routed.front.as_deref()) {
                 prompt.insert_str(0, front);
             }
