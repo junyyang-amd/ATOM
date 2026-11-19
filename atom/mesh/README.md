@@ -248,10 +248,13 @@ worker's labels plus `id`, `url`, `base_url`, `engine`, `model`,
 `worker_type`, `connection_mode` and `health`, for example
 `selector=engine=sglang`. Errors answer `{"error": <code>, "message": ...}`
 with SMG's codes, such as `selector_required`, `invalid_selector`,
-`no_workers_match`, `worker_not_found` and `invalid_engine_path`.
+`no_workers_match`, `worker_not_found` and `invalid_engine_path`. Once a
+worker's status has arrived, the outcome keeps it: a body that then fails to
+read sets `body_error`, and `body` holds the text read before the failure.
 
 Capabilities come from a per-engine table and can be overridden with `rl.*`
-worker labels. For `--backend atom`, discovery also reads `tp_size` and
+worker labels. A flag label such as `rl.flush_cache` takes `true/false`,
+`1/0`, `yes/no` or `on/off` in any case; any other value keeps the table's. For `--backend atom`, discovery also reads `tp_size` and
 `dp_size` from each worker's `/server_info`, so a trainer can lay out ranks.
 
 | Flag | Default | Description |

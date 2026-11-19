@@ -1,3 +1,4 @@
+mod capability_test;
 mod fanout_test;
 mod proxy_test;
 mod selector_test;
