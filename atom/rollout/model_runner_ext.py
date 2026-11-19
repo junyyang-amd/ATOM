@@ -26,6 +26,7 @@ from atom.model_engine.scheduler import ScheduledBatch, ScheduledBatchOutput
 from atom.model_loader.weight_iterator import safetensors_weights_iterator
 from atom.rollout.capabilities import CapabilityProviderMixin
 from atom.rollout.memory_manager import MemoryManagerMixin
+from atom.rollout.rdma_weight_receiver import RDMAWeightReceiverMixin
 from atom.rollout.weight_updater import WeightUpdaterMixin
 from atom.utils.forward_context import get_forward_context
 
@@ -40,7 +41,11 @@ _PG_OPTIONS_KW = (
 
 
 class RLHFModelRunner(
-    ModelRunner, WeightUpdaterMixin, MemoryManagerMixin, CapabilityProviderMixin
+    ModelRunner,
+    WeightUpdaterMixin,
+    RDMAWeightReceiverMixin,
+    MemoryManagerMixin,
+    CapabilityProviderMixin,
 ):
     """ModelRunner with RLHF extensions (weight sync + memory lifecycle + DP isolation).
 
@@ -70,6 +75,9 @@ class RLHFModelRunner(
         self._true_vocab_size = config.true_vocab_size
         # The trainers' weight-update groups this rank has joined, by name.
         self._weights_update_groups = {}
+        self._init_weight_updater()
+        self._init_rdma_receiver(config)
+        self._init_memory_manager()
         super().__init__(rank, config)
         self._check_true_vocab_size(config)
 

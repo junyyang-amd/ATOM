@@ -10,6 +10,7 @@ import safetensors.torch
 import test_kv_change
 import torch
 from aiter_stub import atom_without_aiter
+from conftest import atom_config_double
 from test_collective_rpc_transport import _mgr
 from test_kv_change import _count_index_drops, _running, _wired
 from torch import nn
@@ -17,6 +18,7 @@ from torch import nn
 from atom.config import Config
 from atom.model_engine.collective_rpc import RpcPayload, RpcResult
 from atom.model_engine.engine_utility import kv_change
+from atom.utils.selector import Family
 
 with atom_without_aiter() as _load:
     RLHFModelRunner = _load("atom.rollout.model_runner_ext").RLHFModelRunner
@@ -125,6 +127,9 @@ class _Model(nn.Module):
 
 def _runner():
     runner = object.__new__(RLHFModelRunner)
+    runner._init_weight_updater()
+    runner.config = atom_config_double()
+    runner.attn_family = Family.MHA
     runner.model = _Model()
     runner.device = torch.device("cpu")
     runner.label = "test"
