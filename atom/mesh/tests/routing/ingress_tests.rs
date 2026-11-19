@@ -1284,11 +1284,9 @@ async fn tokens_cache_aware_wants_carry_the_special_tokens_in_any_pair() {
     }
 }
 
-/// `prefix_hash` keys a chat by its templated tokens. Under Qwen2-VL's template, which
-/// renders every image as the same `<|image_pad|>`, two chats that differ only in an image
-/// URL still get different tokens, and the same chat gets the same tokens.
-#[tokio::test]
-async fn chat_tokens_differ_by_image_url_under_a_real_template() {
+/// A tokenizer.json in `dir` with Qwen2-VL's chat template, which renders every image as
+/// the same `<|image_pad|>`: its path, the source preparation workers load copies from.
+fn qwen2_vl_tokenizer(dir: &std::path::Path) -> String {
     let template = "{% set image_count = namespace(value=0) %}{% set video_count = namespace(value=0) %}{% for message in messages %}{% if loop.first and message['role'] != 'system' %}<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n{% endif %}<|im_start|>{{ message['role'] }}\n{% if message['content'] is string %}{{ message['content'] }}<|im_end|>\n{% else %}{% for content in message['content'] %}{% if content['type'] == 'image' or 'image' in content or 'image_url' in content %}{% set image_count.value = image_count.value + 1 %}{% if add_vision_id %}Picture {{ image_count.value }}: {% endif %}<|vision_start|><|image_pad|><|vision_end|>{% elif content['type'] == 'video' or 'video' in content %}{% set video_count.value = video_count.value + 1 %}{% if add_vision_id %}Video {{ video_count.value }}: {% endif %}<|vision_start|><|video_pad|><|vision_end|>{% elif 'text' in content %}{{ content['text'] }}{% endif %}{% endfor %}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
     // One token a character, the hex digits each their own, so texts that differ in a
     // hex digit get different tokens.
@@ -1303,11 +1301,20 @@ async fn chat_tokens_differ_by_image_url_under_a_real_template() {
             "behavior": "Isolated", "invert": false},
         "post_processor": null, "decoder": null,
         "model": {"type": "WordLevel", "unk_token": "<unk>", "vocab": vocab}});
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("tokenizer.json");
+    let path = dir.join("tokenizer.json");
     std::fs::write(&path, tokenizer.to_string()).unwrap();
     let config = json!({"chat_template": template});
-    std::fs::write(dir.path().join("tokenizer_config.json"), config.to_string()).unwrap();
+    std::fs::write(dir.join("tokenizer_config.json"), config.to_string()).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+/// `prefix_hash` keys a chat by its templated tokens. Under Qwen2-VL's template, which
+/// renders every image as the same `<|image_pad|>`, two chats that differ only in an image
+/// URL still get different tokens, and the same chat gets the same tokens.
+#[tokio::test]
+async fn chat_tokens_differ_by_image_url_under_a_real_template() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = qwen2_vl_tokenizer(dir.path());
     let pool = PreparePoolRuntime::new(default_pool()).unwrap();
     let config = crate::config::RouterConfig {
         policy: crate::config::PolicyConfig::PrefixHash {
@@ -1319,7 +1326,7 @@ async fn chat_tokens_differ_by_image_url_under_a_real_template() {
     let app = AppContext::from_config(config, 5, pool.handle())
         .await
         .unwrap();
-    let source = path.to_str().unwrap();
+    let source = source.as_str();
     let tokenizer: Arc<dyn crate::tokenizer::traits::Tokenizer> =
         Arc::new(crate::tokenizer::HuggingFaceTokenizer::from_file(source).unwrap());
     // Preparation workers encode with copies they load from the source.
@@ -1350,6 +1357,105 @@ async fn chat_tokens_differ_by_image_url_under_a_real_template() {
     }
     assert_ne!(tokens[0], tokens[1]);
     assert_eq!(tokens[0], tokens[2]);
+}
+
+/// ATOM keys every KV block of a media prompt by all its media. Under `--backend atom`, two
+/// chats that share a text longer than `prefix_hash`'s token window and differ only in a
+/// later image URL get different `prefix_hash` keys, and `cache_aware` does not place the
+/// second by the first; the same URL gets the same key and is placed with the first. Under
+/// `--backend vllm`, whose cache keys a block by the media it covers, the image past the
+/// window leaves the key the text's, and `cache_aware` matches the shared text.
+#[tokio::test]
+async fn atom_keys_a_media_chat_by_all_its_media_at_the_front() {
+    use crate::{
+        config::BackendType,
+        policies::{CacheAwareConfig, CacheAwarePolicy, PrefixHashConfig, PrefixHashPolicy},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = qwen2_vl_tokenizer(dir.path());
+    let prefix_token_count = 64;
+    let shared = "0123456789abcdef".repeat(2 * prefix_token_count / 16);
+    let chat = |url: &str| {
+        json!({"model": "m", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": shared},
+            {"type": "image_url", "image_url": {"url": url}}]}]})
+    };
+    let workers: Vec<Arc<dyn Worker>> = ["http://w1:8000", "http://w2:8000"]
+        .into_iter()
+        .map(|url| Arc::new(BasicWorkerBuilder::new(url).build()) as Arc<dyn Worker>)
+        .collect();
+    for backend in [BackendType::Atom, BackendType::Vllm] {
+        let pool = PreparePoolRuntime::new(default_pool()).unwrap();
+        let config = crate::config::RouterConfig {
+            policy: crate::config::PolicyConfig::PrefixHash {
+                prefix_token_count,
+                load_factor: 1.25,
+            },
+            backend,
+            ..Default::default()
+        };
+        let app = AppContext::from_config(config, 5, pool.handle())
+            .await
+            .unwrap();
+        let tokenizer: Arc<dyn crate::tokenizer::traits::Tokenizer> =
+            Arc::new(crate::tokenizer::HuggingFaceTokenizer::from_file(&source).unwrap());
+        app.tokenizer_registry
+            .load("qwen2-vl-id", "m", &source, || async { Ok(tokenizer) })
+            .await
+            .unwrap();
+        let prefix_hash = PrefixHashPolicy::new(PrefixHashConfig {
+            prefix_token_count,
+            load_factor: 1.25,
+        });
+        let cache_aware = CacheAwarePolicy::with_config(CacheAwareConfig {
+            cache_threshold: 0.5,
+            eviction_interval_secs: 0,
+            ..Default::default()
+        });
+        cache_aware.init_workers(&workers);
+        let mut keys = Vec::new();
+        let mut branches = Vec::new();
+        for url in ["https://x/a.png", "https://x/b.png", "https://x/a.png"] {
+            let parsed =
+                ParsedInference::parse("/v1/chat/completions", chat(url).to_string().as_bytes())
+                    .unwrap();
+            let routing = IngressRouting::new(&app);
+            let (metadata, tokens) = app
+                .prepare_pool
+                .submit(app.prepare_pool.prepare_deadline(), move |ctx| {
+                    routing.prepare(&parsed, ctx)
+                })
+                .await
+                .unwrap()
+                .wait()
+                .await
+                .unwrap()
+                .unwrap();
+            let tokens = tokens.unwrap();
+            assert!(tokens.len() > prefix_token_count);
+            keys.push(prefix_hash.compute_prefix_hash(&tokens));
+            let info = crate::policies::SelectWorkerInfo {
+                request_text: Some(&metadata.text),
+                ..Default::default()
+            };
+            branches.push(
+                cache_aware
+                    .select_with_decision(&workers, &info)
+                    .await
+                    .1
+                    .branch,
+            );
+        }
+        assert_eq!(keys[0], keys[2], "{backend:?}");
+        assert_eq!(branches[2], "affinity", "{backend:?}");
+        if backend == BackendType::Atom {
+            assert_ne!(keys[0], keys[1]);
+            assert_eq!(branches[1], "relocate");
+        } else {
+            assert_eq!(keys[0], keys[1]);
+            assert_eq!(branches[1], "affinity");
+        }
+    }
 }
 
 /// The template and encode stages `--kv-events` adds to a chat request `cache_aware`
