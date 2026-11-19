@@ -195,7 +195,7 @@ class OneRank:
             ]
         try:
             value = getattr(self.runner, method)(*payload.args, **payload.call_kwargs())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - answered, as a worker does
             return [
                 RpcResult(
                     payload.request_id,
