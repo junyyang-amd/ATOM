@@ -78,8 +78,11 @@ PROMPTS = [f"{form} {topic}." for form in _FORMS for topic in _TOPICS]
 SAMPLING = {"temperature": 0, "max_new_tokens": 64}
 # ATOM's greedy output does not repeat on one server (near-ties flip), so an
 # output equals fresh when each of its tokens, given the tokens before it, is
-# within FRESH_MARGIN nats of the fresh server's top token.
-FRESH_MARGIN = 0.5
+# within FRESH_MARGIN nats of the fresh server's top token. Its logprobs move
+# in 0.25 steps; the margin sits two steps above the largest gap seen between
+# two fresh servers on one checkpoint at TP1, TP2 and 1P1D (measured in #141),
+# and well under the gap OLD's outputs show against fresh NEW.
+FRESH_MARGIN = 1.0
 TOP_LOGPROBS = 20  # the most ATOM's chat route returns
 
 

@@ -263,7 +263,13 @@ def fresh(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "behind,equal,why",
-    [(0.0, True, None), (0.4, True, None), (0.6, False, "0.600 below")],
+    [
+        (0.0, True, None),
+        (0.75, True, None),  # a step above two fresh servers' largest gap
+        (accept.FRESH_MARGIN, True, None),
+        (accept.FRESH_MARGIN + 0.25, False, f"{accept.FRESH_MARGIN + 0.25:.3f} below"),
+        (3.75, False, "3.750 below"),  # Qwen3-1.7B-Base against fresh Qwen3-1.7B
+    ],
 )
 def test_equals_fresh_holds_each_token_within_the_margin_of_the_fresh_top(
     fresh, behind, equal, why
