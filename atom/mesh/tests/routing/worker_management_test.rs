@@ -181,10 +181,14 @@ mod worker_management_tests {
         ctx.shutdown().await;
     }
 
-    /// A worker's discovered `model_path` beats a router-wide `--model-path`, so a
-    /// router in front of workers for several models loads each model's own tokenizer.
-    #[tokio::test]
-    async fn test_discovered_model_path_beats_the_router_model_path() {
+    /// Registers a worker that serves its load path (`MockWorker::set_model_path`) behind
+    /// a router with `--model-path` and `backend`, and encodes "a b" with the tokenizer
+    /// the router registered for `model_id` (`None`: the worker's path).
+    async fn encode_with_discovered_path(
+        port: u16,
+        backend: mesh::config::types::BackendType,
+        model_id: Option<&str>,
+    ) -> Vec<u32> {
         let router_dir = tokenizer_dir(&["a", "b"]);
         let worker_dir = tokenizer_dir(&["b", "a"]);
         let worker_path = worker_dir.path().to_str().unwrap();
@@ -192,7 +196,8 @@ mod worker_management_tests {
         let url = worker.start().await.unwrap();
         worker.set_model_path(worker_path).await;
 
-        let mut config = TestRouterConfig::round_robin(3911);
+        let mut config = TestRouterConfig::round_robin(port);
+        config.backend = backend;
         config.model_path = Some(router_dir.path().to_str().unwrap().to_string());
         let ctx = AppTestContext::new_with_config(config, vec![]).await;
         let req = Request::builder()
@@ -204,10 +209,29 @@ mod worker_management_tests {
         let resp = ctx.create_app().await.oneshot(req).await.unwrap();
         assert!(resp.status().is_success(), "{}", resp.status());
 
-        let why = "the worker's tokenizer should load from its discovered model_path";
-        assert_eq!(encode_with(&ctx, worker_path, "a b", why).await, [2, 1]);
+        let why = "the worker's tokenizer should load from its discovered path";
+        let ids = encode_with(&ctx, model_id.unwrap_or(worker_path), "a b", why).await;
 
         ctx.shutdown().await;
         worker.stop().await;
+        ids
+    }
+
+    /// A worker's discovered `model_path` beats a router-wide `--model-path`, so a
+    /// router in front of workers for several models loads each model's own tokenizer.
+    #[tokio::test]
+    async fn test_discovered_model_path_beats_the_router_model_path() {
+        let backend = mesh::config::types::BackendType::Sglang;
+        let ids = encode_with_discovered_path(3911, backend, None).await;
+        assert_eq!(ids, [2, 1]);
+    }
+
+    /// The same for a vLLM HTTP worker, whose `/v1/models` card gives the load path as
+    /// `root` and the model id (here `mock-model`) apart from it.
+    #[tokio::test]
+    async fn test_vllm_model_root_beats_the_router_model_path() {
+        let backend = mesh::config::types::BackendType::Vllm;
+        let ids = encode_with_discovered_path(3912, backend, Some("mock-model")).await;
+        assert_eq!(ids, [2, 1]);
     }
 }
