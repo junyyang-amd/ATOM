@@ -2393,7 +2393,8 @@ class Config:
     weight_version: str = "default"
     # The runners take weight syncs and say which they cannot
     # (`get_worker_capabilities`), as RLHFModelRunner does: EngineCore asks
-    # them once, at startup. Set by AsyncLLMEngine.
+    # them once, at startup. Set by AsyncLLMEngine, and by --enable-rl when it
+    # selects RLHFModelRunner.
     weight_sync_runner: bool = False
     # EPLB master switch + sub-config
     eplb_enable: bool = False
@@ -2725,6 +2726,7 @@ class Config:
             )
         elif self.enable_rl:
             self.runner_qualname = "atom.rollout.model_runner_ext.RLHFModelRunner"
+            self.weight_sync_runner = True
 
     def _resolve_dcp_comm_backend(self) -> None:
         """``dcp.comm_backend="auto"``: the mailbox combine where it has been

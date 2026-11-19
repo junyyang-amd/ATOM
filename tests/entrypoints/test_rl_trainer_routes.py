@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""The trainer weight-update group routes ``--enable-rl`` adds: each is one
-synchronous utility command, and a refused update is answered 400 and logged
-as leaving the trainer's broadcast without a receiver."""
+"""The trainer weight-update group routes ``--enable-rl`` adds: joining and
+leaving the group run the runners' weight-group methods through
+``collective_rpc`` under SGLang's field names, an update is one synchronous
+utility command, and a refused update is answered 400 once its tensors are
+received."""
 
 from __future__ import annotations
 
-import logging
 from types import SimpleNamespace
 
 import pytest
@@ -20,8 +21,9 @@ try:
 except ImportError as exc:  # pragma: no cover - environment-dependent skip
     skip_if_dependency_missing(exc, "api_server import unavailable")
 
-from test_kv_change import _running, _wired
+from test_kv_change import _Runners, _running, _wired
 
+from atom.model_engine.collective_rpc import RpcResult
 from atom.model_engine.engine_utility import EngineUtilityHandler
 
 ROUTES = (
@@ -48,14 +50,27 @@ UPDATE = {
 
 
 class _CoreManager:
-    """Records each synchronous broadcast."""
+    """Records each synchronous broadcast and collective call; the ranks in
+    *failing* fail the latter."""
 
-    def __init__(self):
+    def __init__(self, failing=()):
         self.calls = []
+        self.failing = set(failing)
 
     def broadcast_utility_command_sync(self, cmd, timeout=300.0, **kwargs):
         self.calls.append((cmd, kwargs))
         return [{"cmd": cmd}]
+
+    def collective_rpc(
+        self, method, args=(), kwargs=None, barrier=False, timeout=300.0
+    ):
+        self.calls.append((method, kwargs))
+        return [
+            RpcResult(
+                "r", rank, error="RuntimeError: no" if rank in self.failing else None
+            )
+            for rank in range(2)
+        ]
 
 
 @pytest.fixture
@@ -79,23 +94,54 @@ def serve(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "path,body,cmd",
+    "path,body,sent",
     [
-        ("/init_weights_update_group", INIT, "init_weights_update_group"),
-        ("/update_weights_from_distributed", UPDATE, "update_weights_from_distributed"),
+        (
+            "/init_weights_update_group",
+            INIT,
+            (
+                "init_rdma_weight_group",
+                {
+                    "master_addr": "10.0.0.1",
+                    "master_port": 29500,
+                    "base_rank": 1,
+                    "world_size": 3,
+                    "group_name": "refit",
+                },
+            ),
+        ),
+        (
+            "/update_weights_from_distributed",
+            UPDATE,
+            ("update_weights_from_distributed", UPDATE),
+        ),
         (
             "/destroy_weights_update_group",
             {"group_name": "refit"},
-            "destroy_weights_update_group",
+            ("destroy_rdma_weight_group", {"group_name": "refit"}),
         ),
     ],
 )
-def test_each_route_sends_its_utility_command(serve, path, body, cmd):
+def test_each_route_sends_its_command_under_its_names(serve, path, body, sent):
     client, core_mgr = serve(enable_rl=True)
     reply = client.post(path, json={**body, "unknown": 1})
     assert reply.status_code == 200
-    assert reply.json() == {"success": True, "message": f"{cmd} succeeded"}
-    assert core_mgr.calls == [(cmd, body)]
+    assert reply.json() == {"success": True, "message": f"{path[1:]} succeeded"}
+    assert core_mgr.calls == [sent]
+
+
+def test_a_group_over_another_backend_is_refused(serve):
+    client, core_mgr = serve(enable_rl=True)
+    reply = client.post("/init_weights_update_group", json={**INIT, "backend": "gloo"})
+    assert reply.status_code == 400 and "'gloo'" in reply.json()["message"]
+    assert core_mgr.calls == []
+
+
+def test_a_join_a_rank_failed_answers_400_with_that_rank(serve):
+    client, _ = serve(enable_rl=True, core_mgr=_CoreManager(failing={1}))
+    reply = client.post("/init_weights_update_group", json=INIT)
+    assert reply.status_code == 400
+    assert reply.json() == {"success": False, "message": "TP rank 1: RuntimeError: no"}
 
 
 def _refused_by_the_fence(monkeypatch, sched):
@@ -110,22 +156,26 @@ def _refused_by_pd(monkeypatch, sched):
 
 @pytest.mark.parametrize(
     "refuse, reason",
-    [(_refused_by_the_fence, "refused"), (_refused_by_pd, "only while paused")],
+    [(_refused_by_the_fence, "cannot preempt"), (_refused_by_pd, "only while paused")],
 )
-def test_a_refused_update_answers_400_and_logs_the_broadcast_unreceived(
-    serve, monkeypatch, caplog, refuse, reason
+def test_a_refused_update_is_received_then_answered_400(
+    serve, monkeypatch, refuse, reason
 ):
     sched, _ = _running(1)
     refuse(monkeypatch, sched)
-    mgr, (engine,) = _wired([sched])
+    runners = _Runners()
+    mgr, (engine,) = _wired([sched], [runners])
     client, _ = serve(enable_rl=True, core_mgr=mgr)
 
-    with caplog.at_level(logging.ERROR, logger="atom"):
-        reply = client.post("/update_weights_from_distributed", json=UPDATE)
+    reply = client.post("/update_weights_from_distributed", json=UPDATE)
 
     assert reply.status_code == 400 and reply.json()["success"] is False
     assert reason in reply.json()["message"]
-    assert "'refit' has no receiver" in caplog.text
+    (method, payload), (discard, _) = runners.calls
+    assert discard == "discard_failed_weight_sync"
+    assert method == "update_weights_from_distributed"
+    assert payload.args == (["proj.weight"], ["bfloat16"], [[2, 3]], "refit")
+    assert reason in payload.kwargs["refusal"], "received to be discarded"
     assert sched.weight_version != "v2"
     assert not engine._weight_sync_fenced, "nothing was written"
 

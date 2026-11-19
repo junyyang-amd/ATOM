@@ -63,8 +63,6 @@ UTILITY_MANAGED_RUNNER_METHODS = frozenset(
         "update_weights_from_ipc",
         "update_weights_from_disk",
         "update_weights_from_distributed",
-        "init_weights_update_group",
-        "destroy_weights_update_group",
         RECEIVE_WEIGHTS_RDMA_CMD,
         DISCARD_WEIGHT_SYNC_CMD,
         "release_memory",
