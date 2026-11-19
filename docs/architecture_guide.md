@@ -274,7 +274,8 @@ fence keeps serving off until that complete sync commits.
 
 What syncs the runners can take is asked once, at engine startup, when
 ``Config.weight_sync_runner`` says they answer ``get_worker_capabilities``
-(``AsyncLLMEngine`` sets it); a runner that cannot answer fails startup. Each
+(``AsyncLLMEngine`` sets it, and so does ``--enable-rl`` when it selects
+``RLHFModelRunner``); a runner that cannot answer fails startup. Each
 engine reports the answer in its READY, and CoreManager refuses a reload that
 any engine's runners cannot take before any engine runs it -- under PP, one
 stage's runners alone may be the ones that cannot. Such a sync -- a model a
