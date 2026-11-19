@@ -86,12 +86,12 @@ impl ProxyRequest {
 }
 
 /// The engine's body as JSON when its content type says JSON and it parses
-/// whole, otherwise as text; text when `truncated`, since cut bytes do not parse.
-fn parse_body(content_type: Option<&HeaderValue>, bytes: &[u8], truncated: bool) -> Value {
+/// whole, otherwise as text; text when `cut`, since cut bytes do not parse.
+fn parse_body(content_type: Option<&HeaderValue>, bytes: &[u8], cut: bool) -> Value {
     let is_json = content_type
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("json"));
-    if is_json && !truncated {
+    if is_json && !cut {
         if let Ok(v) = serde_json::from_slice(bytes) {
             return v;
         }
@@ -118,11 +118,6 @@ pub async fn call_worker(
         });
     };
     let timeout_secs = state.context.router_config.rl.control_timeout_secs;
-    let unreachable = |message: String| RlError::UpstreamUnreachable {
-        worker_id: worker.id.clone(),
-        url: worker.url.clone(),
-        message,
-    };
     // A per-request timeout replaces the client's request timeout, which a
     // refit can outlive.
     let mut builder = state
@@ -152,19 +147,30 @@ pub async fn call_worker(
                 timeout_secs,
             }
         } else {
-            unreachable(e.to_string())
+            RlError::UpstreamUnreachable {
+                worker_id: worker.id.clone(),
+                url: worker.url.clone(),
+                message: e.to_string(),
+            }
         }
     })?;
     let status = response.status().as_u16();
     let content_type = response.headers().get(CONTENT_TYPE).cloned();
-    // Read at most BODY_CAP bytes rather than buffer an unbounded body.
+    // Read at most BODY_CAP bytes rather than buffer an unbounded body. The
+    // status already says whether the engine applied the call, so a failed
+    // read keeps it and is reported beside it, not as an unreachable worker.
     let mut collected = Vec::new();
     let mut truncated = false;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| unreachable(format!("reading response body: {e}")))?
-    {
+    let mut body_error = None;
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(e) => {
+                body_error = Some(format!("reading response body: {e}"));
+                break;
+            }
+        };
         let room = BODY_CAP - collected.len();
         if chunk.len() > room {
             collected.extend_from_slice(&chunk[..room]);
@@ -176,15 +182,21 @@ pub async fn call_worker(
     let latency_ms = started.elapsed().as_millis() as u64;
     info!(
         worker_id = %worker.id, url = %worker.url, method = %req.method,
-        path = %req.path, status, latency_ms, "rl.proxy"
+        path = %req.path, status, latency_ms,
+        body_error = body_error.as_deref(), "rl.proxy"
     );
     Ok(RlCallOutcome {
         worker_id: worker.id.clone(),
         url: worker.url.clone(),
         status,
         latency_ms,
-        body: parse_body(content_type.as_ref(), &collected, truncated),
+        body: parse_body(
+            content_type.as_ref(),
+            &collected,
+            truncated || body_error.is_some(),
+        ),
         body_truncated: truncated,
+        body_error,
     })
 }
 

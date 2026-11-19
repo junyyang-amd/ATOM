@@ -85,6 +85,10 @@ pub struct RlCallOutcome {
     /// Set when the body was cut at the size cap.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub body_truncated: bool,
+    /// Set when reading the body failed after the status arrived; `body` then
+    /// holds the bytes read before the failure, as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_error: Option<String>,
 }
 
 /// One fan-out target that did not succeed.
