@@ -1378,8 +1378,9 @@ fn nested_generate_media_counts_the_items_it_holds() {
     }
 }
 
-/// The routing text ATOM backends get starts with one digest of all a chat's media, in
-/// order; vLLM and SGLang get the in-place digests alone.
+/// The routing text ATOM backends get starts with one digest of the chat up to its last
+/// media ([`RoutingChat::front`]), which media order changes; vLLM and SGLang get the
+/// in-place digests alone.
 #[test]
 fn atom_routing_text_starts_with_one_digest_of_all_media() {
     let two = |first: &str, second: &str| {
@@ -1425,12 +1426,14 @@ fn atom_routing_text_starts_with_one_digest_of_all_media() {
     assert_eq!(text(&plain, true), "hi");
 }
 
-/// ATOM keys every KV block of a media prompt by all its media. Under `--backend atom`, two
-/// chats that share a text longer than `prefix_hash`'s token window and differ only in a
-/// later image URL get different `prefix_hash` keys, and `cache_aware` does not place the
-/// second by the first; the same URL gets the same key and is placed with the first. Under
-/// `--backend vllm`, whose cache keys a block by the media it covers, the image past the
-/// window leaves the key the text's, and `cache_aware` matches the shared text.
+/// ATOM keys every KV block of a media prompt by its media and the text before them
+/// ([`RoutingChat::front`]; DeepSeek-V4.1 also by the prompt's length, which the key does
+/// not see). Under `--backend atom`, two chats that share a text longer than `prefix_hash`'s
+/// token window and differ only in a later image URL get different `prefix_hash` keys, and
+/// `cache_aware` does not place the second by the first; the same URL gets the same key and
+/// is placed with the first. Under `--backend vllm`, whose cache keys a block by the media it
+/// covers, the image past the window leaves the key the text's, and `cache_aware` matches
+/// the shared text.
 #[tokio::test]
 async fn atom_keys_a_media_chat_by_all_its_media_at_the_front() {
     use crate::{
@@ -1525,13 +1528,14 @@ async fn atom_keys_a_media_chat_by_all_its_media_at_the_front() {
 }
 
 /// ATOM keys every KV block of a media prompt by its media's pixels, which an image's
-/// `detail` changes, and by their token positions, which the text before them sets. Under
-/// `--backend atom`, chats after one long system prompt that differ only in the text before
-/// the same image, in their second image or in an image's `detail` get different
+/// `detail: "low"` changes, and by their token positions, which the text before them sets.
+/// Under `--backend atom`, chats after one long system prompt that differ only in the text
+/// before the same image, in their second image or in a low `detail` get different
 /// `prefix_hash` keys and `cache_aware` places none by another; a later turn after the same
-/// images keeps the key and is placed with the first. Under `--backend vllm` all of them keep
-/// the system prompt's key and are placed together. DeepSeek-V4.1 also keys every block by
-/// the prompt's length, so on it that later turn shares no block, though its key is one.
+/// images, text after the last image in its message and `detail: "auto"` keep the key and
+/// are placed with the first. Under `--backend vllm` all of them keep the system prompt's
+/// key and are placed together. DeepSeek-V4.1 also keys every block by the prompt's length,
+/// so on it that later turn shares no block, though its key is one.
 #[tokio::test]
 async fn atom_keys_a_media_chat_by_the_chat_up_to_its_last_media() {
     use crate::{
@@ -1552,8 +1556,8 @@ async fn atom_keys_a_media_chat_by_the_chat_up_to_its_last_media() {
         image("https://x/b.png"),
         image("https://x/c.png"),
     );
-    let low =
-        json!({"type": "image_url", "image_url": {"url": "https://x/a.png", "detail": "low"}});
+    let detail = |detail: &str| json!({"type": "image_url", "image_url": {"url": "https://x/a.png", "detail": detail}});
+    let (low, auto) = (detail("low"), detail("auto"));
     // Each chat after the first is compared with the one it names.
     let chats = [
         ("first", None, vec![system.clone(), user("1", &[a.clone()])]),
@@ -1583,6 +1587,20 @@ async fn atom_keys_a_media_chat_by_the_chat_up_to_its_last_media() {
             vec![system.clone(), user("1", &[a.clone(), c])],
         ),
         ("detail", Some(0), vec![system.clone(), user("1", &[low])]),
+        (
+            "detail auto",
+            Some(0),
+            vec![system.clone(), user("1", &[auto])],
+        ),
+        (
+            "text after",
+            Some(0),
+            vec![
+                system.clone(),
+                json!({"role": "user", "content": [
+                    {"type": "text", "text": "1"}, a.clone(), {"type": "text", "text": "x"}]}),
+            ],
+        ),
     ];
     let workers: Vec<Arc<dyn Worker>> = ["http://w1:8000", "http://w2:8000"]
         .into_iter()
@@ -1646,7 +1664,8 @@ async fn atom_keys_a_media_chat_by_the_chat_up_to_its_last_media() {
                 .1
                 .branch;
             let Some(compared) = *compared else { continue };
-            let shared = backend == BackendType::Vllm || *case == "later turn";
+            let shared = backend == BackendType::Vllm
+                || matches!(*case, "later turn" | "detail auto" | "text after");
             assert_eq!(
                 keys[compared] == keys[keys.len() - 1],
                 shared,

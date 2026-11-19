@@ -76,10 +76,11 @@ pub(crate) struct RoutingChat {
     /// takes the rest of the chat from the client's request.
     pub messages: Vec<ChatMessage>,
     /// For ATOM backends: one digest of the chat up to and including its last
-    /// media part, with each image's `detail`, which goes before the routing
-    /// text and before the templated prompt. ATOM keys every KV block of a media
-    /// prompt by its media's pixels and token positions, so two prompts that
-    /// differ only in an image, its `detail` or the text before an image share
+    /// media part, with whether each image's `detail` is `"low"`, the one value
+    /// that changes its pixels; it goes before the routing text and before the
+    /// templated prompt. ATOM keys every KV block of a media prompt by its
+    /// media's pixels and token positions, so two prompts that differ only in an
+    /// image, in whether its `detail` is low or in the text before an image share
     /// no block, however long their shared text; a later turn after the same
     /// media keeps the digest. DeepSeek-V4.1 also keys every block by each
     /// prompt token's type, so its prompts that differ in length after the last
@@ -195,7 +196,8 @@ fn media_url(part: &ContentPart) -> Option<(&'static str, &str)> {
 
 /// See [`RoutingChat::front`]: one digest of `digested`, `request`'s messages
 /// with their media digested in place, up to and including the last media part,
-/// and of each image's `detail`, which the in-place digests leave out.
+/// and of whether each image's `detail` is `"low"`, which the in-place digests
+/// leave out.
 fn front_digest(request: &ChatCompletionRequest, digested: &[ChatMessage]) -> String {
     let (message, part) = request
         .messages
@@ -212,16 +214,17 @@ fn front_digest(request: &ChatCompletionRequest, digested: &[ChatMessage]) -> St
         .as_array_mut()
         .expect("media is a content part")
         .truncate(part + 1);
-    let details: Vec<Option<&str>> = request
+    // Only `detail: "low"` changes an image's pixels; any other value leaves them.
+    let low_details: Vec<bool> = request
         .messages
         .iter()
         .flat_map(parts)
         .filter_map(|part| match part {
-            ContentPart::ImageUrl { image_url } => Some(image_url.detail.as_deref()),
+            ContentPart::ImageUrl { image_url } => Some(image_url.detail.as_deref() == Some("low")),
             _ => None,
         })
         .collect();
-    let bytes = serde_json::to_vec(&(front, details)).expect("JSON values serialize");
+    let bytes = serde_json::to_vec(&(front, low_details)).expect("JSON values serialize");
     format!(
         "\u{1}media:{:016x}\u{1}",
         xxhash_rust::xxh3::xxh3_64(&bytes)
