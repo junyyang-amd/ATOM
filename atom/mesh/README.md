@@ -225,6 +225,57 @@ USE_ATOMESH_ENTRYPOINTS=1 python -m atom.entrypoints.openai_server mesh-only \
 Supported reasoning parsers: `deepseek-r1`, `qwen3`, `qwen3-thinking`, `kimi`, `glm45`, `glm47`, `step3`, `minimax`.  
 Supported tool parsers: `json`, `python`, `xml`.
 
+### RL rollout control (`--enable-rl`)
+
+With `--enable-rl`, Atomesh mounts an RL control plane under `/v1/rl`: a
+trainer pauses, refits and resumes its rollout workers through the router and
+never connects to a worker. Without the flag no route is added. The routes
+speak the protocol of SMG's RL control plane
+([smg-project/smg@6c7bda1](https://github.com/smg-project/smg/tree/6c7bda118c5c6c02e65fe104cc8d93a0f906c965/crates/rl)).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/rl/workers` | `protocol_version`, `total` and one row per worker: `engine` (the `--backend`), `tp_size` / `dp_size` / `pp_size`, health, the `weight_version` label, labels and capabilities. DP ranks sharing a base URL make one row (`dp_ranks`) |
+| `GET` | `/v1/rl/workers/{id}` | One row |
+| `GET` / `POST` | `/v1/rl/workers/{id}/engine/{path}` | One engine route of one worker, called with the caller's body; answers the engine's status and an outcome with its body |
+| `GET` / `POST` | `/v1/rl/engine/{path}?selector=...` | One engine call to every worker the selector matches, a DP group once; answers 200, or 207 when any call failed, with per-worker outcomes and failures |
+
+`{path}` is the engine's own route, such as `pause_generation`,
+`update_weights_from_disk`, `continue_generation` or `model_info`: 1 to 4
+segments of `[A-Za-z0-9._-]`. The engine must serve it. The selector is a
+comma-separated AND of `k=v`, `k!=v`, `k in (a,b)` and `k notin (a,b)` over a
+worker's labels plus `id`, `url`, `base_url`, `engine`, `model`,
+`worker_type`, `connection_mode` and `health`, for example
+`selector=engine=sglang`. Errors answer `{"error": <code>, "message": ...}`
+with SMG's codes, such as `selector_required`, `invalid_selector`,
+`no_workers_match`, `worker_not_found` and `invalid_engine_path`.
+
+Capabilities come from a per-engine table and can be overridden with `rl.*`
+worker labels. For `--backend atom`, discovery also reads `tp_size` and
+`dp_size` from each worker's `/server_info`, so a trainer can lay out ranks.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--rl-control-timeout-secs` | 600 | Total timeout of one engine control call; a refit can take minutes |
+| `--rl-fanout-concurrency` | 32 | Engine calls in flight at once during a fan-out |
+
+`--enable-rl` changes no other default. For long rollouts, launch with SMG's
+profile, so that a transient engine error opens no circuit breaker for a whole
+training step and a multi-hour rollout does not time out:
+
+```bash
+./target/release/atomesh launch \
+  --worker-urls http://rollout1:30000 http://rollout2:30000 \
+  --policy cache_aware \
+  --enable-rl --disable-health-check --disable-circuit-breaker \
+  --request-timeout-secs 14400
+```
+
+SMG's Python client `smg.rl` (`RL`, `paused`, `bindings/python/src/smg/rl.py`
+at the commit above) and its `examples/rl` scripts work against Atomesh
+unchanged: point `--smg` at the Atomesh URL and pass `--selector
+engine=<backend>`, since the scripts default to `engine=sglang`.
+
 ## Architecture
 
 ### Control plane
