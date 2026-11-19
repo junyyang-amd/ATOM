@@ -201,8 +201,6 @@ class EngineUtilityHandler:
         "update_weights_ipc": "_handle_update_weights_ipc",
         "update_weights_from_disk": "_handle_update_weights_from_disk",
         "update_weights_from_distributed": "_handle_update_weights_from_distributed",
-        "init_weights_update_group": "_handle_init_weights_update_group",
-        "destroy_weights_update_group": "_handle_destroy_weights_update_group",
         RECEIVE_WEIGHTS_RDMA_CMD: "_handle_receive_weights_rdma",
         DISCARD_WEIGHT_SYNC_CMD: "_handle_discard_failed_weight_sync",
         FINISH_WEIGHT_SYNC_CMD: "_handle_finish_weight_sync",
@@ -304,8 +302,6 @@ class EngineUtilityHandler:
                     self._refuse(cmd, args, refusal)
                     continue
                 if cmd in WEIGHT_UPDATE_UTILITY_CMDS:
-                    if self._pd_disaggregated() and args.get("weight_version") is None:
-                        self._weights_unversioned = True
                     starts_sync = not self._continues_weight_sync(cmd, args)
                     fenced = engine._weight_sync_fenced
                     # Local success is not global success: another DP engine
@@ -361,7 +357,14 @@ class EngineUtilityHandler:
                             logger.info(f"{self.label}: engine exited sleep mode")
                 elif cmd in WEIGHT_UPDATE_UTILITY_CMDS:
                     failed = isinstance(reply, dict) and bool(reply.get("error"))
-                    self._sync_wrote = self._sync_wrote or not _wrote_nothing(reply)
+                    wrote = not _wrote_nothing(reply)
+                    self._sync_wrote = self._sync_wrote or wrote
+                    if (
+                        wrote
+                        and self._pd_disaggregated()
+                        and args.get("weight_version") is None
+                    ):
+                        self._weights_unversioned = True
                     if failed:
                         self._weight_sync_in_progress = False
                         self._weight_sync_failure = self._weight_sync_failure or str(
@@ -508,11 +511,10 @@ class EngineUtilityHandler:
     def _refuse(self, cmd: str, args, reason: str) -> dict:
         """Answer *cmd* with *reason*, writing nothing of it.
 
-        A weight stream is still taken in and discarded, so this lasts as
-        long as the stream does; see ``_drain_refused_stream``.
+        What a trainer is already broadcasting is still taken in and
+        discarded, so this lasts as long as that does; see ``_drain_refused``.
         """
-        if cmd == RECEIVE_WEIGHTS_RDMA_CMD:
-            self._drain_refused_stream(args, reason)
+        self._drain_refused(cmd, args, reason)
         reply = {
             "cmd": cmd,
             "error": f"refused: {reason}",
@@ -527,6 +529,41 @@ class EngineUtilityHandler:
         finally:
             self.output_queue.request_id = None
         return reply
+
+    def _drain_refused(self, cmd: str, args, reason: str) -> None:
+        """Have the runners take in and discard what a refused *cmd* is
+        being sent by a trainer, if it is: a weight stream, or a trainer's
+        chunk of tensors."""
+        if cmd == RECEIVE_WEIGHTS_RDMA_CMD:
+            self._drain_refused_stream(args, reason)
+        elif cmd == "update_weights_from_distributed":
+            self._drain_refused_chunk(args, reason)
+
+    def _drain_refused_chunk(self, args, reason: str) -> None:
+        """Take in and discard the tensors *args* names: the trainer is
+        already broadcasting them, and would wait in its first broadcast until
+        its group timed out."""
+        payload = RpcPayload(
+            request_id=f"update_weights_from_distributed-refused-{uuid.uuid4().hex}",
+            args=(
+                args.get("names", []),
+                args.get("dtypes", []),
+                args.get("shapes", []),
+                args.get("group_name"),
+            ),
+            kwargs={"refusal": reason},
+        )
+        try:
+            self.runner_mgr.utility_rpc(
+                "update_weights_from_distributed",
+                payload,
+                timeout=_remaining_timeout(args, _DIRECT_UPDATE_TIMEOUT_S),
+            )
+        except Exception:  # the refusal is what is answered
+            logger.exception(
+                f"{self.label}: a refused update_weights_from_distributed was "
+                f"not drained"
+            )
 
     def _drain_refused_stream(self, args, reason: str) -> None:
         """Take in and discard the weight stream *args* names: its trainer is
@@ -764,8 +801,7 @@ class EngineUtilityHandler:
                 f"weight sync {self._sync_id!r} already failed, so this update "
                 f"cannot complete it: {self._weight_sync_failure}"
             )
-            if cmd == RECEIVE_WEIGHTS_RDMA_CMD:
-                self._drain_refused_stream(args, error)
+            self._drain_refused(cmd, args, error)
             return {"cmd": cmd, "error": error, "refused_before_writing": True}
         payload = RpcPayload(
             request_id=f"{cmd}-{uuid.uuid4().hex}",
@@ -960,39 +996,6 @@ class EngineUtilityHandler:
             args.get("dtypes", []),
             args.get("shapes", []),
             args.get("group_name"),
-        )
-        self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
-        return reply
-
-    def _handle_init_weights_update_group(self, args: dict) -> dict:
-        """Every TP rank joins the trainer's group as ``rank_offset`` + its rank.
-
-        Each rank waits in the rendezvous until the trainer and every other
-        rank have joined, so the group and this call share one deadline.
-        """
-        timeout = _remaining_timeout(args, 300.0)
-        reply = self._utility_on_every_rank(
-            "init_weights_update_group",
-            "init_weights_update_group",
-            args.get("master_address"),
-            args.get("master_port"),
-            args.get("rank_offset"),
-            args.get("world_size"),
-            args.get("group_name"),
-            args.get("backend", "nccl"),
-            timeout,
-            timeout=timeout,
-        )
-        self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
-        return reply
-
-    def _handle_destroy_weights_update_group(self, args: dict) -> dict:
-        """Every TP rank leaves the trainer's group."""
-        reply = self._utility_on_every_rank(
-            "destroy_weights_update_group",
-            "destroy_weights_update_group",
-            args.get("group_name"),
-            timeout=_remaining_timeout(args, 300.0),
         )
         self.output_queue.put_nowait(("UTILITY_RESPONSE", reply))
         return reply

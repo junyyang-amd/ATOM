@@ -5,39 +5,24 @@ import inspect
 import logging
 import os
 from contextlib import nullcontext
-from datetime import timedelta
 
 import numpy as np
 import torch
-import torch.distributed as dist
 from aiter import init_dist_env
 from aiter.dist.parallel_state import get_tp_group
 from aiter.dist.utils import get_distributed_init_method
-from torch.distributed.distributed_c10d import (
-    Backend,
-    PrefixStore,
-    _new_process_group_helper,
-    _world,
-    rendezvous,
-)
 
+from atom.model_engine.collective_rpc import WeightReloadRefused
 from atom.model_engine.model_runner import ModelRunner
 from atom.model_engine.scheduler import ScheduledBatch, ScheduledBatchOutput
 from atom.model_loader.weight_iterator import safetensors_weights_iterator
 from atom.rollout.capabilities import CapabilityProviderMixin
 from atom.rollout.memory_manager import MemoryManagerMixin
-from atom.rollout.rdma_weight_receiver import RDMAWeightReceiverMixin
+from atom.rollout.rdma_weight_receiver import RDMAWeightReceiverMixin, _receive
 from atom.rollout.weight_updater import WeightUpdaterMixin
 from atom.utils.forward_context import get_forward_context
 
 logger = logging.getLogger("atom")
-
-# torch renamed the helper's options keyword.
-_PG_OPTIONS_KW = (
-    "backend_options"
-    if "backend_options" in inspect.signature(_new_process_group_helper).parameters
-    else "pg_options"
-)
 
 
 class RLHFModelRunner(
@@ -73,8 +58,6 @@ class RLHFModelRunner(
         # padded", which is the right answer for almost every model and costs
         # one comparison per step.
         self._true_vocab_size = config.true_vocab_size
-        # The trainers' weight-update groups this rank has joined, by name.
-        self._weights_update_groups = {}
         self._init_weight_updater()
         self._init_rdma_receiver(config)
         self._init_memory_manager()
@@ -158,64 +141,19 @@ class RLHFModelRunner(
             needs_independent_noise=needs_independent_noise,
         )
 
-    def update_weights_from_disk(self, model_path: str) -> int:
+    def update_weights_from_disk(
+        self, model_path: str, require_full: bool = False
+    ) -> int:
         """Overwrite the weights with the safetensors checkpoint at *model_path*.
 
-        One ``update_weights`` call over a generator, so one tensor is read at
-        a time; ``load_model`` is not rerun, since its post-processing would
-        run again on weights it already processed.
+        One ``update_weights`` call, so the checkpoint is one sync; it holds
+        the whole checkpoint in host memory while it writes. ``load_model`` is
+        not rerun, since its post-processing would run again on weights it
+        already processed. *require_full*: see ``_complete_sync``.
         """
-        return self.update_weights(safetensors_weights_iterator(model_path))
-
-    def init_weights_update_group(
-        self,
-        master_address: str,
-        master_port: int,
-        rank_offset: int,
-        world_size: int,
-        group_name: str,
-        backend: str = "nccl",
-        timeout: float = 300.0,
-    ) -> int:
-        """Join a trainer's weight-update group as ``rank_offset`` + this TP rank.
-
-        Built as SMG's trainer builds its side
-        (``examples/rl/refit_from_trainer.py: _join_trainer_group``): torch's
-        own helper over ``PrefixStore(group_name, TCPStore)``. A plain
-        ``init_process_group`` prefixes the store differently, and the first
-        broadcast would never match up. Returns the rank taken.
-        """
-        if group_name in self._weights_update_groups:
-            raise ValueError(
-                f"weight-update group {group_name!r} already exists; destroy it first"
-            )
-        delta = timedelta(seconds=timeout)
-        store, rank, world_size = next(
-            rendezvous(
-                f"tcp://{master_address}:{master_port}",
-                rank_offset + self.rank,
-                world_size,
-                timeout=delta,
-            )
+        return self.update_weights(
+            safetensors_weights_iterator(model_path), require_full=require_full
         )
-        store.set_timeout(delta)
-        group, _ = _new_process_group_helper(
-            world_size,
-            rank,
-            [],
-            Backend(backend),
-            PrefixStore(group_name, store),
-            group_name=group_name,
-            timeout=delta,
-            **{_PG_OPTIONS_KW: None},
-        )
-        _world.pg_group_ranks[group] = {i: i for i in range(world_size)}
-        self._weights_update_groups[group_name] = group
-        logger.info(
-            f"{self.label}: joined weight-update group {group_name!r} as rank "
-            f"{rank} of {world_size}"
-        )
-        return rank
 
     def update_weights_from_distributed(
         self,
@@ -223,16 +161,27 @@ class RLHFModelRunner(
         dtypes: list[str],
         shapes: list[list[int]],
         group_name: str,
+        require_full: bool = False,
+        refusal: str | None = None,
     ) -> int:
-        """Receive each tensor from rank 0 of *group_name* by broadcast, in
-        the order named, into one ``update_weights`` call.
+        """Receive each tensor the trainer broadcasts on *group_name*, in the
+        order named, and write them all in one ``update_weights`` call.
 
-        One received tensor is resident at a time. A raise part-way leaves the
-        trainer's later broadcasts without this receiver.
+        The chunk is received whole before anything is written. *refusal* is
+        the engine's reason to refuse the chunk: its tensors are received all
+        the same, as the trainer is already broadcasting them, then discarded,
+        and the refusal is raised. A broadcast that fails or times out leaves
+        this rank's end of the group, which has to be joined again; nothing
+        was written. *require_full*: see ``_complete_sync``.
         """
-        group = self._weights_update_group(group_name)
+        weight_group = self._rdma_groups.get(group_name)
+        if weight_group is None:
+            raise WeightReloadRefused(
+                f"no weight-update group {group_name!r}; "
+                f"init_weights_update_group first"
+            )
         if not len(names) == len(dtypes) == len(shapes):
-            raise ValueError(
+            raise WeightReloadRefused(
                 f"names, dtypes and shapes differ in length: "
                 f"{len(names)}, {len(dtypes)}, {len(shapes)}"
             )
@@ -241,30 +190,24 @@ class RLHFModelRunner(
             d for d, t in zip(dtypes, torch_dtypes) if not isinstance(t, torch.dtype)
         ]
         if unknown:
-            raise ValueError(f"not torch dtypes: {unknown}")
+            raise WeightReloadRefused(f"not torch dtypes: {unknown}")
 
-        def received():
-            for name, dtype, shape in zip(names, torch_dtypes, shapes):
-                tensor = torch.empty(shape, dtype=dtype, device=self.device)
-                dist.broadcast(tensor, src=0, group=group)
-                yield name, tensor
-
-        return self.update_weights(received())
-
-    def destroy_weights_update_group(self, group_name: str) -> None:
-        """Leave *group_name*; a later init may form it again."""
-        dist.destroy_process_group(self._weights_update_group(group_name))
-        del self._weights_update_groups[group_name]
-        logger.info(f"{self.label}: left weight-update group {group_name!r}")
-
-    def _weights_update_group(self, group_name: str):
-        try:
-            return self._weights_update_groups[group_name]
-        except KeyError:
-            raise ValueError(
-                f"no weight-update group {group_name!r}; "
-                f"init_weights_update_group first"
-            ) from None
+        received = []
+        for name, dtype, shape in zip(names, torch_dtypes, shapes):
+            tensor = torch.empty(shape, dtype=dtype, device=self.device)
+            try:
+                _receive(tensor, weight_group.group, weight_group.timeout)
+            except Exception as exc:
+                self.destroy_rdma_weight_group(group_name)
+                raise WeightReloadRefused(
+                    f"receiving {name!r} on weight-update group {group_name!r} "
+                    f"failed, and this rank left the group: {exc}"
+                ) from exc
+            if refusal is None:
+                received.append((name, tensor))
+        if refusal is not None:
+            raise WeightReloadRefused(refusal)
+        return self.update_weights(received, require_full=require_full)
 
     def _setup_device_and_distributed(self, rank: int, config):
         """Override to set up DP-isolated NCCL worlds.

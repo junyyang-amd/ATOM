@@ -50,6 +50,10 @@ from atom.kv_transfer.disaggregation.mooncake.endpoint import (
     producer_endpoint,
 )
 from atom.model_engine.arg_utils import EngineArgs
+from atom.model_engine.collective_rpc import (
+    DESTROY_RDMA_WEIGHT_GROUP_CMD,
+    INIT_RDMA_WEIGHT_GROUP_CMD,
+)
 from atom.model_engine.engine_utility import (
     PAUSE_GENERATION_CMD,
     RESUME_GENERATION_CMD,
@@ -3720,35 +3724,44 @@ _RL_ROUTES = {
         "update_weights_from_disk",
         ("model_path", "weight_version", "flush_cache"),
     ),
-    "/init_weights_update_group": (
-        "init_weights_update_group",
-        (
-            "master_address",
-            "master_port",
-            "rank_offset",
-            "world_size",
-            "group_name",
-            "backend",
-        ),
-    ),
     "/update_weights_from_distributed": (
         "update_weights_from_distributed",
         ("names", "dtypes", "shapes", "group_name", "weight_version", "flush_cache"),
     ),
+}
+# The trainer group routes (--enable-rl): each path, the runner method
+# collective_rpc runs on every worker, and its keyword for each body field
+# SGLang names. A ``backend`` other than nccl is refused.
+_RL_GROUP_ROUTES = {
+    "/init_weights_update_group": (
+        INIT_RDMA_WEIGHT_GROUP_CMD,
+        {
+            "master_address": "master_addr",
+            "master_port": "master_port",
+            "rank_offset": "base_rank",
+            "world_size": "world_size",
+            "group_name": "group_name",
+        },
+    ),
     "/destroy_weights_update_group": (
-        "destroy_weights_update_group",
-        ("group_name",),
+        DESTROY_RDMA_WEIGHT_GROUP_CMD,
+        {"group_name": "group_name"},
     ),
 }
 
 
 def register_rl_routes(args) -> None:
-    """Serve ``_RL_ROUTES``, ``/model_info`` and ``/generate`` when the server
-    runs with ``--enable-rl``."""
+    """Serve ``_RL_ROUTES``, ``_RL_GROUP_ROUTES``, ``/model_info`` and
+    ``/generate`` when the server runs with ``--enable-rl``."""
     if not args.enable_rl:
         return
     for path, (cmd, fields) in _RL_ROUTES.items():
         _engine_route(path, methods=["POST"], name=cmd)(_rl_route(cmd, fields))
+    for path, (method, fields) in _RL_GROUP_ROUTES.items():
+        name = path.lstrip("/")
+        _engine_route(path, methods=["POST"], name=name)(
+            _rl_group_route(name, method, fields)
+        )
     _engine_route("/model_info", name="model_info")(_rl_model_info)
     app.post("/generate")(_rl_generate)
 
@@ -3855,15 +3868,23 @@ def _sglang_finish_reason(reason: str | None, completion_tokens: int) -> dict | 
     return {"type": reason}
 
 
+async def _rl_body(request: Request) -> dict | JSONResponse:
+    """The request's JSON object, or the 400 that answers it."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError as exc:
+        return _rl_reply(False, f"body is not JSON: {exc}")
+    if not isinstance(body, dict):
+        return _rl_reply(False, "body must be a JSON object")
+    return body
+
+
 def _rl_route(cmd: str, fields: tuple[str, ...]):
     async def route(request: Request) -> JSONResponse:
-        raw = await request.body()
-        try:
-            body = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError as exc:
-            return _rl_reply(False, f"body is not JSON: {exc}")
-        if not isinstance(body, dict):
-            return _rl_reply(False, "body must be a JSON object")
+        body = await _rl_body(request)
+        if isinstance(body, JSONResponse):
+            return body
         if cmd == "update_weights_from_disk" and not body.get("model_path"):
             return _rl_reply(False, "model_path is required")
         kwargs = {name: body[name] for name in fields if name in body}
@@ -3873,14 +3894,34 @@ def _rl_route(cmd: str, fields: tuple[str, ...]):
             )
         except Exception as exc:  # noqa: BLE001 - answered as the route's 400
             logger.error("%s failed: %s", cmd, exc)
-            if cmd == "update_weights_from_distributed":
-                logger.error(
-                    "The trainer's broadcast on group %r has no receiver on this "
-                    "engine; the trainer waits on it until its own timeout",
-                    body.get("group_name"),
-                )
             return _rl_reply(False, str(exc))
         return _rl_reply(True, f"{cmd} succeeded")
+
+    return route
+
+
+def _rl_group_route(name: str, method: str, fields: dict[str, str]):
+    async def route(request: Request) -> JSONResponse:
+        body = await _rl_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        backend = body.get("backend", "nccl")
+        if backend != "nccl":
+            return _rl_reply(False, f"backend {backend!r} is not served, only nccl")
+        kwargs = {kw: body[field] for field, kw in fields.items() if field in body}
+        try:
+            replies = await asyncio.to_thread(
+                engine.core_mgr.collective_rpc, method, kwargs=kwargs
+            )
+        except Exception as exc:  # noqa: BLE001 - answered as the route's 400
+            logger.error("%s failed: %s", name, exc)
+            return _rl_reply(False, str(exc))
+        failed = [r for r in replies if not r.ok]
+        if failed:
+            message = "; ".join(f"TP rank {r.tp_rank}: {r.error}" for r in failed)
+            logger.error("%s failed: %s", name, message)
+            return _rl_reply(False, message)
+        return _rl_reply(True, f"{name} succeeded")
 
     return route
 

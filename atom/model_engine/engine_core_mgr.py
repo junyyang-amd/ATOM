@@ -2303,11 +2303,14 @@ class CoreManager:
         engine runs it: each engine refuses only what its own cannot, so under
         PP the head would have written by the time a later stage refused.
 
-        Not a weight stream: its trainer is already broadcasting, so each
-        engine takes it in and refuses it there.
+        Not a weight stream or a trainer's chunk: its trainer is already
+        broadcasting, so each engine takes it in and refuses it there.
         """
         reason = self._weight_syncs_unavailable.get(WEIGHT_RELOAD_FEATURE)
-        if cmd == RECEIVE_WEIGHTS_RDMA_CMD or reason is None:
+        if (
+            cmd in (RECEIVE_WEIGHTS_RDMA_CMD, "update_weights_from_distributed")
+            or reason is None
+        ):
             return
         if in_session:
             ctx = self._weight_sync_context

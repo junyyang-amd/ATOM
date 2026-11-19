@@ -272,6 +272,10 @@ SMG's. `rl.*` labels override as in SMG.
   HTTP. It wraps the same utility commands for verl and adds nothing the
   handlers lack.
 
+On `main`'s weight sync the two group routes run `init_rdma_weight_group` /
+`destroy_rdma_weight_group` through `CoreManager.collective_rpc` instead
+(M3).
+
 ### D5. The served runner
 
 `--enable-rl` sets `runner_qualname` to

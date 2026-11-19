@@ -13,7 +13,7 @@ from unittest import mock
 import pytest
 import test_pd_admission
 from conftest import MockConfig
-from test_kv_change import _engine, _run, _running, _wired
+from test_kv_change import _engine, _run, _Runners, _running, _wired
 from test_pd_admission import receive_success
 
 from atom.model_engine.engine_utility import (
@@ -289,6 +289,21 @@ def test_a_versionless_pd_update_holds_the_pause_until_a_version(build):
     mgr.broadcast_utility_command_sync(RESUME_GENERATION_CMD, timeout=5)
 
     assert sched.weight_version == "v2" and not engine._generation_paused
+
+
+def test_a_versionless_pd_update_refused_before_writing_leaves_resume_allowed(build):
+    """Every rank refused it before writing, so the weights are still the
+    version the engine serves."""
+    sched, _ = build()
+    runners = _Runners(unasked=True, refusal="cannot reload", refusing={0})
+    mgr, (engine,) = _wired([sched], [runners])
+    mgr.broadcast_utility_command_sync(PAUSE_GENERATION_CMD, timeout=5)
+
+    with pytest.raises(RuntimeError, match="cannot reload"):
+        mgr.broadcast_utility_command_sync(UPDATE, model_path="/ckpt/a", timeout=5)
+    mgr.broadcast_utility_command_sync(RESUME_GENERATION_CMD, timeout=5)
+
+    assert not engine._generation_paused
 
 
 def test_a_versionless_update_leaves_an_engine_without_pd_resumable():
