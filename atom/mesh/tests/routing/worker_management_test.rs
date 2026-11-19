@@ -136,4 +136,38 @@ mod worker_management_tests {
 
         ctx.shutdown().await;
     }
+
+    /// A worker that `/v1/models` names by an alias (the mock's `mock-model`) gets its
+    /// tokenizer from `--tokenizer-path`, not from the alias, under `--backend atom`.
+    #[tokio::test]
+    async fn test_aliased_worker_tokenizer_comes_from_the_tokenizer_path() {
+        use mesh::tokenizer::traits::Encoder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = json!({"version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [], "normalizer": null, "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null, "decoder": null,
+            "model": {"type": "WordLevel", "unk_token": "<unk>",
+                "vocab": {"<unk>": 0, "a": 1, "b": 2}}});
+        std::fs::write(dir.path().join("tokenizer.json"), tokenizer.to_string()).unwrap();
+
+        let mut config = TestRouterConfig::round_robin(3910);
+        config.backend = mesh::config::types::BackendType::Atom;
+        config.tokenizer_path = Some(dir.path().to_str().unwrap().to_string());
+        let ctx = AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(0)]).await;
+
+        let registry = &ctx.app_context.tokenizer_registry;
+        let start = tokio::time::Instant::now();
+        while registry.get("mock-model").is_none()
+            && start.elapsed() < tokio::time::Duration::from_secs(10)
+        {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        let tokenizer = registry
+            .get("mock-model")
+            .expect("the aliased worker's tokenizer should load from --tokenizer-path");
+        assert_eq!(tokenizer.encode("a b", false).unwrap().token_ids(), [1, 2]);
+
+        ctx.shutdown().await;
+    }
 }

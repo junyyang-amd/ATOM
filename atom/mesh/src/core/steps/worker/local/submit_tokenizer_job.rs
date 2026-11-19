@@ -5,7 +5,7 @@
 //! and caching - this step just submits the job.
 
 use async_trait::async_trait;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::{
@@ -64,33 +64,29 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
         for worker in workers.iter() {
             let model_id = worker.model_id().to_string();
 
-            // Get tokenizer path with fallback chain:
-            // 1. Worker labels: tokenizer_path
-            // 2. Worker labels: model_path
-            // 3. Router config (CLI args): --tokenizer-path
-            // 4. Router config (CLI args): --model-path
-            let tokenizer_path: String = if let Some(path) = labels
+            // Tokenizer source, most specific first:
+            // 1. Worker labels: tokenizer_path (discovered or configured)
+            // 2. Worker config labels: model_path
+            // 3. Router config (CLI args): --tokenizer-path, then --model-path
+            // 4. Discovered labels: model_path. Under `--backend atom` or `vllm`
+            //    it is the model id `/v1/models` returns, which is an alias when
+            //    the worker serves under `--served-model-name`, so it comes last.
+            let router_config = &app_context.router_config;
+            let tokenizer_path: String = match labels
                 .get("tokenizer_path")
+                .or_else(|| context.data.config.labels.get("model_path"))
+                .or(router_config.tokenizer_path.as_ref())
+                .or(router_config.model_path.as_ref())
                 .or_else(|| labels.get("model_path"))
             {
-                path.clone()
-            } else if let Some(path) = app_context
-                .router_config
-                .tokenizer_path
-                .as_ref()
-                .or(app_context.router_config.model_path.as_ref())
-            {
-                debug!(
-                    "Using router config tokenizer path '{}' for model {}",
-                    path, model_id
-                );
-                path.clone()
-            } else {
-                warn!(
-                    "No tokenizer_path or model_path found for model {} (checked worker labels and router config)",
-                    model_id
-                );
-                continue;
+                Some(path) => path.clone(),
+                None => {
+                    warn!(
+                        "No tokenizer_path or model_path found for model {} (checked worker labels and router config)",
+                        model_id
+                    );
+                    continue;
+                }
             };
 
             // Note: We don't check if tokenizer already exists here.
