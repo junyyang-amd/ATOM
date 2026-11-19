@@ -1359,6 +1359,62 @@ async fn chat_tokens_differ_by_image_url_under_a_real_template() {
     assert_eq!(tokens[0], tokens[2]);
 }
 
+/// A batch's nested `image_data` counts the items it holds.
+#[test]
+fn nested_generate_media_counts_the_items_it_holds() {
+    for (image_data, count) in [
+        ("[]", 0),
+        ("[[],[]]", 0),
+        ("[null,[]]", 0),
+        (r#"[["a.png"],["b.png","c.png"]]"#, 3),
+        (r#"[[],["a.png"]]"#, 1),
+    ] {
+        let body = format!(r#"{{"input_ids":[1,2],"image_data":{image_data}}}"#);
+        let metadata = ParsedInference::parse("/generate", body.as_bytes())
+            .unwrap()
+            .metadata_with_text(false);
+        assert_eq!(metadata.media_count, count, "{image_data}");
+        assert_eq!(metadata.carries_media, count > 0, "{image_data}");
+    }
+}
+
+/// The routing text ATOM backends get starts with one digest of all a chat's media, in
+/// order; vLLM and SGLang get the in-place digests alone.
+#[test]
+fn atom_routing_text_starts_with_one_digest_of_all_media() {
+    let two = |first: &str, second: &str| {
+        let image = |url: &str| format!(r#"{{"type":"image_url","image_url":{{"url":"{url}"}}}}"#);
+        let body = format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":[{{"type":"text","text":"describe"}},{},{}]}}]}}"#,
+            image(first),
+            image(second)
+        );
+        ParsedInference::parse("/v1/chat/completions", body.as_bytes()).unwrap()
+    };
+    let text = |parsed: &ParsedInference, front: bool| parsed.routing_metadata(front).0.text;
+    let (ab, ba) = (two("a", "b"), two("b", "a"));
+    // vLLM and SGLang keep the in-place digests alone.
+    assert_eq!(text(&ab, false), ab.metadata().text);
+    assert!(text(&ab, false).starts_with("describe "));
+    let front = ab.routing_metadata(true).1.unwrap().front.unwrap();
+    assert!(front.starts_with("\u{1}media:"));
+    assert_eq!(text(&ab, true), format!("{front}{}", text(&ab, false)));
+    // Media order is part of the key.
+    assert_ne!(
+        text(&ab, true)[..front.len()],
+        text(&ba, true)[..front.len()]
+    );
+    assert_eq!(text(&ab, true), text(&two("a", "b"), true));
+    // Text-only chats are unchanged.
+    let plain = ParsedInference::parse(
+        "/v1/chat/completions",
+        br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .unwrap();
+    assert!(plain.routing_metadata(true).1.is_none());
+    assert_eq!(text(&plain, true), "hi");
+}
+
 /// ATOM keys every KV block of a media prompt by all its media. Under `--backend atom`, two
 /// chats that share a text longer than `prefix_hash`'s token window and differ only in a
 /// later image URL get different `prefix_hash` keys, and `cache_aware` does not place the
