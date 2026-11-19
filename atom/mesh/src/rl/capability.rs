@@ -61,10 +61,15 @@ fn list_label(labels: &HashMap<String, String>, key: &str) -> Option<Vec<String>
     })
 }
 
+/// `true/false`, `1/0`, `yes/no` or `on/off`, any case; `None` for any other
+/// value, which keeps the static default.
 fn bool_label(labels: &HashMap<String, String>, key: &str) -> Option<bool> {
-    labels
-        .get(key)
-        .map(|v| v.trim().eq_ignore_ascii_case("true"))
+    let v = labels.get(key)?.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// The static row for `engine`, with any `rl.*` label overrides applied.

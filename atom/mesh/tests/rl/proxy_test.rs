@@ -222,6 +222,55 @@ async fn rl_proxy_truncates_a_body_past_the_cap() {
     worker.stop().await;
 }
 
+/// An engine that answers any request `202` with a JSON body promised at 64
+/// bytes, sends 11 of them and closes the connection.
+pub(super) async fn cut_engine() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let head = "HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\n\
+                            content-length: 64\r\n\r\n{\"applied\":";
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    url
+}
+
+#[tokio::test]
+async fn rl_proxy_keeps_the_status_when_the_body_read_fails() {
+    let url = cut_engine().await;
+    let ctx = AppTestContext::new_with_config(rl_config(true, 5), vec![]).await;
+    let app = ctx.create_app().await;
+    let id = insert(&ctx, BasicWorkerBuilder::new(&url));
+
+    let (status, outcome) = post(&app, &format!("/v1/rl/workers/{id}/engine/flush_cache")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{outcome}");
+    assert_eq!(outcome["status"], 202);
+    assert_eq!(outcome["worker_id"], id);
+    assert_eq!(outcome["body"], "{\"applied\":");
+    assert!(outcome.get("body_truncated").is_none());
+    assert!(outcome["body_error"]
+        .as_str()
+        .unwrap()
+        .starts_with("reading response body"));
+
+    ctx.shutdown().await;
+}
+
 #[tokio::test]
 async fn rl_proxy_errors_carry_smg_statuses() {
     let mut worker = mock_worker();

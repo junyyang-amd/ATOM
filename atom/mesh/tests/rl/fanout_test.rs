@@ -360,3 +360,28 @@ async fn rl_fanout_never_exceeds_the_concurrency_flag() {
 
     ctx.shutdown().await;
 }
+
+#[tokio::test]
+async fn rl_fanout_keeps_the_status_when_a_body_read_fails() {
+    let url = super::proxy_test::cut_engine().await;
+    let ctx = AppTestContext::new_with_config(rl_config(4), vec![]).await;
+    let app = ctx.create_app().await;
+    let id = insert(&ctx, BasicWorkerBuilder::new(&url));
+
+    let (status, report) = fan_out(&app, "flush_cache", "engine=atom").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the engine applied the call: {report}"
+    );
+    assert_eq!(report["succeeded"], 1);
+    assert_eq!(report["failed"], json!([]));
+    let outcome = &report["results"][&id];
+    assert_eq!(outcome["status"], 202);
+    assert!(outcome["body_error"]
+        .as_str()
+        .unwrap()
+        .starts_with("reading response body"));
+
+    ctx.shutdown().await;
+}
