@@ -303,6 +303,9 @@ prefixes and is committed by FINISH like an SHM update.
 - Rejected: call `load_model` again. Post-processing would run on already
   processed weights.
 
+On `main`'s weight sync the call also passes `require_full`, and the whole
+checkpoint is resident per rank while it writes (M7).
+
 ### D7. The trainer group
 
 `init_weights_update_group` runs `RLHFModelRunner.init_weights_update_group`
@@ -331,6 +334,9 @@ parameters, so each chunk is one `update_weights` call, which clears
 `qkv` loses shards (spike #91 handoff). The acceptance models are bf16 and
 never take that path; FP8 checkpoints are a non-goal here, and the defect
 is [#97](https://github.com/junyyang-amd/ATOM/issues/97).
+
+On `main`'s weight sync the group and the write are rebuilt as M3 to M6
+say.
 
 ### D8. `weight_version`
 
@@ -540,6 +546,288 @@ records the largest gap seen.
 - Rejected: a pytest GPU suite. The gate is CPU-only, and the requirement
   names the command.
 
+## Main's weight sync
+
+Since `RL` was cut, ROCm/ATOM `main` landed `ROCm/ATOM#3058` (a0221c199): a
+trainer-to-rollout RCCL path with its own wire format, every weight update a
+sync that one EngineCore fence guards and FINISH commits, and a startup
+capability query. This section decides, for each engine-side piece of `RL`,
+whether it is kept, rebuilt on that sync, or dropped. `main` code is cited at
+ROCm/ATOM `main` 4defd41aa ("main" below); `RL` code at `fork/RL` 0cd48b045.
+Goals 4 and 5 hold: `main` removes nothing the SGLang routes call, and its
+group and write path can carry SGLang's per-tensor broadcasts (M1).
+
+| Piece | Verdict | Decision |
+|---|---|---|
+| `--enable-rl` engine routes (D4) | keep; runner flag added | M2 |
+| Trainer group join and leave (D7) | rebuild on `main`'s group | M3 |
+| `update_weights_from_distributed` (D7) | rebuild on `main`'s group and receive | M4-M6 |
+| Refit from disk (D6) | keep; `require_full` passed | M7 |
+| `weight_version` (D8) | keep | M9 |
+| P/D stamp and in-flight policy (D11) | keep; one mark moved | M8 |
+| Chat logprobs under P/D (#130) | keep | M9 |
+| `RL`'s own group code | drop | M3 |
+
+### A3 on main
+
+```mermaid
+sequenceDiagram
+    participant T as SMG trainer (unchanged)
+    participant A as ATOM api_server (--enable-rl)
+    participant E as EngineUtilityHandler
+    participant R as RLHFModelRunner rank k
+    T->>A: POST /init_weights_update_group {master_address, master_port, rank_offset, world_size, group_name, backend}
+    A->>R: CoreManager.collective_rpc(init_rdma_weight_group, base_rank=rank_offset)
+    R->>R: vote with engine peers, join as rank_offset + tp_rank
+    loop each chunk
+        T->>A: POST /update_weights_from_distributed {names, dtypes, shapes, group_name, weight_version?}
+        A->>E: update_weights_from_distributed: one whole sync
+        E->>E: fence, prepare_kv_change, preempt
+        E->>R: update_weights_from_distributed(..., require_full)
+        R->>R: _receive per tensor, update_weights(received, require_full)
+        E->>E: FINISH commits, fence down, weight_version set if named
+    end
+    T->>A: POST /destroy_weights_update_group {group_name}
+    A->>R: collective_rpc(destroy_rdma_weight_group)
+```
+
+A chunk sent while the weights are not whole fails unless it rewrites every
+parameter (M5).
+
+### A2 on main
+
+```mermaid
+sequenceDiagram
+    participant H as accept.py refit_disk
+    participant A as ATOM api_server (--enable-rl)
+    participant C as CoreManager
+    participant E as EngineUtilityHandler
+    participant R as RLHFModelRunner rank k
+    H->>A: POST /pause_generation, then /update_weights_from_disk {model_path, weight_version}
+    A->>C: broadcast_utility_command_sync(update_weights_from_disk), a sync of its own
+    C->>C: _refuse_what_an_engine_cannot_take: refuse before any engine writes
+    C->>E: update_weights_from_disk, sync_id
+    E->>E: _sync_refusal, prepare_weight_sync, prepare_kv_change, fence up
+    E->>R: update_weights_from_disk(model_path, require_full=_rl_weights_inconsistent)
+    R->>R: update_weights(safetensors_weights_iterator(path), require_full)
+    R->>R: _complete_sync: zero KV pool, fail if require_full and a parameter is unwritten
+    E->>E: forget prefix index if a rank wrote
+    E-->>C: reply, refused_before_writing if no rank wrote
+    C->>E: FINISH
+    E->>E: fence down, weights whole, weight_version set
+    A-->>H: 200 {success: true, message}
+    H->>A: POST /continue_generation, then /generate
+    Note over H: PASS when versions are new and the outputs equal fresh on the new checkpoint
+```
+
+A1, A4 to A9 change nothing at the routes.
+
+### M1. SGLang's framing stays; `main`'s stream is not served over HTTP
+
+The trainer routes keep SGLang's bodies and per-tensor broadcasts; `main`'s
+`receive_weights_rdma` gets no route.
+
+- Basis: code: main `atom/rollout/rdma_weight_receiver.py` (module doc)
+  freezes LumenRL's frames (a 4-word header, JSON metadata, one payload),
+  while SMG `examples/rl/refit_from_trainer.py` broadcasts each tensor the
+  HTTP body names; goal 4 forbids changing that trainer. principle: no
+  generality for speculative needs (no goal names a LumenRL client).
+- Rejected: translate the SGLang calls onto `receive_weights_rdma`. SMG's
+  trainer would have to send LumenRL's frames.
+
+### M2. `--enable-rl` also sets `weight_sync_runner`
+
+`Config._select_runner` sets `weight_sync_runner` when `--enable-rl` selects
+`RLHFModelRunner`.
+
+- Basis: code: main `atom/config.py: Config.weight_sync_runner`;
+  `engine_core.py: EngineCore.__init__` asks
+  `engine_utility.py: ask_what_runners_cannot_take` only when it is set, and
+  `engine_core_mgr.py: CoreManager._refuse_what_an_engine_cannot_take`
+  refuses from that answer before any engine writes;
+  `atom/rollout/async_engine.py: AsyncLLMEngine.__init__` sets it.
+- Rejected: leave it unset. The runners then refuse an unreloadable model
+  themselves, but under PP the head stage has written by then.
+
+### M3. Join and leave through `main`'s group
+
+`/init_weights_update_group` calls `init_rdma_weight_group` and
+`/destroy_weights_update_group` calls `destroy_rdma_weight_group`, both
+through `CoreManager.collective_rpc`. Fields map `master_address` ->
+`master_addr`, `rank_offset` -> `base_rank`; `master_port`, `world_size`,
+`group_name` keep their names; a `backend` other than `nccl` answers 400.
+`RL`'s `init_weights_update_group` / `destroy_weights_update_group` runner
+methods, utility commands and `_weights_update_groups` are dropped.
+
+- Basis: code: main `rdma_weight_receiver.py:
+  RDMAWeightReceiverMixin.init_rdma_weight_group` builds the group through
+  `atom/utils/distributed/utils.py:
+  stateless_init_torch_distributed_process_group`: `rendezvous`,
+  `PrefixStore(group_name, store)`, `_new_process_group_helper`, identity
+  rank map, the calls `RL`'s `init_weights_update_group` makes and spike #91
+  ran. It adds a join vote among the engine's workers, a refusal under DP or
+  PP above 1 (`_rdma_receive_refusal`; #121's rank collision becomes a
+  refusal), and `TORCH_NCCL_ASYNC_ERROR_HANDLING=2` so a trainer gone
+  mid-chunk fails the update instead of ending the engine.
+  `collective_rpc.py: COLLECTIVE_RPC_METHODS` lists both methods, and
+  `engine_utility.py: EngineUtilityHandler._handle_collective_rpc` keeps the
+  engine's record of the group. principle: reuse existing code first.
+- Rejected: keep `RL`'s group code. Two registries and two builders for one
+  kind of group, and `RL`'s leaves a gone trainer to the NCCL watchdog.
+
+### M4. A trainer chunk is received on `main`'s group and written by `update_weights`
+
+`RLHFModelRunner.update_weights_from_distributed(names, dtypes, shapes,
+group_name, require_full=False)` takes the group from `_rdma_groups`,
+receives each tensor with `rdma_weight_receiver.py: _receive` (a broadcast
+waited on for the group's timeout) and passes the received list to
+`update_weights(received, require_full=require_full)`. The command stays in
+`WEIGHT_UPDATE_UTILITY_CMDS`.
+
+- Basis: code: main `engine_utility.py: EngineUtilityHandler._update_on_every_rank`
+  passes `require_full` to every update; `weight_updater.py:
+  WeightUpdaterMixin.update_weights` takes it and is one
+  `_write_batch(complete=True)` under `_one_update` and
+  `_discard_sync_state_on_error`, the write every `main` path ends in;
+  `_apply_named_tensors` lists its input, so the chunk is received whole
+  before any write, as SGLang does. `_receive` (module doc): an unwaited
+  broadcast on a communicator aborted for a timeout returns its tensor
+  unwritten, which would then be written as weights. principle: reuse
+  existing code first.
+- Rejected: keep `RL`'s receive loop and pass `require_full` through to
+  `update_weights`. The loop reads `RL`'s `_weights_update_groups` and calls
+  a plain `dist.broadcast`; it needs `RL`'s group, which M3 drops.
+
+### M5. One call, one sync
+
+Each `update_weights_from_distributed` call is a whole sync: its own fence,
+KV clear and FINISH, as each call is a whole update today.
+
+Once the engine's weights are not whole (`engine._rl_weights_inconsistent`:
+an earlier sync failed after writing or was abandoned, a DISCARD came, or a
+release discarded the weights), every chunk's sync is sent
+`require_full=True`. A chunk that leaves any checkpoint parameter unwritten
+then fails `WeightUpdaterMixin._complete_sync` after writing, and the engine
+stays fenced. A chunked trainer refit then fails on every chunk; only a sync
+that rewrites every parameter takes the fence down: a refit from disk (A2 on
+main, M7) or a trainer refit sent in one chunk. On `RL` the flag is set
+but nothing reads it, so the next chunk that succeeds takes the fence down
+over mixed weights.
+
+- Basis: code: main `engine_core_mgr.py: CoreManager.weight_sync_session`
+  keeps the sync id in a thread-local context under a lock held for one
+  caller's `with` block, and `broadcast_utility_command_sync` refuses a
+  non-final update outside it; each chunk is its own HTTP request.
+  `engine_utility.py: EngineUtilityHandler.process_queue` sets
+  `_rl_weights_inconsistent` and clears it only at FINISH;
+  `_update_on_every_rank` sends it as `require_full`; on `RL` nothing reads
+  the flag (`engine_core.py: EngineCore.__init__` and `process_queue` only
+  set it). SMG `examples/rl/refit_from_trainer.py: _stream_weights` marks
+  the last chunk (`flush_cache: true`, and `weight_version` on it alone).
+  reference: SGLang's
+  [`io_struct.py: UpdateWeightsFromDistributedReqInput`](https://github.com/sgl-project/sglang/blob/33a03ba42ee4c6036d75c22e71b9bb8600c79355/python/sglang/srt/managers/io_struct.py)
+  defaults `flush_cache` to true, so a client that omits it marks every
+  chunk last. A fused FP8 parameter split
+  across chunks now fails in `_complete_sync` rather than losing shards
+  (#97). principle: the simplest solution that meets acceptance.
+- Rejected: one sync across a trainer's chunks, closed by the chunk with
+  `flush_cache: true`. It lifts the lock-out for SMG's trainer, but needs a
+  sync that one HTTP request opens and a later one closes: new session state
+  in `CoreManager`, with a deadline for a trainer that never sends its last
+  chunk. What it serves, a trainer refit after a failed one and FP8 across
+  chunks, no acceptance item checks; a refit from disk recovers.
+
+### M6. A refused chunk is still received
+
+An `update_weights_from_distributed` refused before it writes (P/D rule 5,
+an unreloadable model, a failed sync) still receives the named tensors and
+discards them. `EngineUtilityHandler._refuse` and
+`CoreManager._refuse_what_an_engine_cannot_take` treat it as they treat a
+stream.
+
+- Basis: code: main `engine_utility.py: EngineUtilityHandler._refuse`,
+  `_drain_refused_stream`; `CoreManager._refuse_what_an_engine_cannot_take`
+  exempts a stream because "its trainer is already broadcasting". principle:
+  follow the project's existing conventions.
+- Rejected: refuse without receiving. The trainer then sits in its
+  broadcast until the group's timeout aborts the group.
+
+### M7. Refit from disk is one `update_weights` call, `require_full` passed
+
+`RLHFModelRunner.update_weights_from_disk(model_path, require_full=False)`
+stays `RL`'s one `update_weights(safetensors_weights_iterator(model_path))`
+call and passes `require_full` through. The checkpoint is one sync, so a
+refit from disk rewrites every parameter and takes down a fence a failed
+sync left (M5).
+
+- Basis: code: main `weight_updater.py: WeightUpdaterMixin.update_weights`
+  takes `require_full`; `engine_utility.py:
+  EngineUtilityHandler._update_on_every_rank` passes it. principle: the
+  simplest solution that meets acceptance. Cost: `_apply_named_tensors`
+  lists its input, so each TP rank holds the whole checkpoint in host memory
+  while it writes (`model_loader/weight_iterator.py:
+  safetensors_weights_iterator` yields CPU copies), where `RL` held one
+  tensor. A2 refits Qwen3-1.7B; no acceptance item names a checkpoint that
+  does not fit.
+- Rejected: write the checkpoint through `_write_batch` in bounded batches,
+  the last with `complete=True`. It bounds host memory, which no acceptance
+  item needs, and its batch size would rest on no measurement.
+
+### M8. Under P/D, only an update that wrote marks the weights unversioned
+
+D11 rule 5 is kept, with one change: an update naming no version marks the
+weights unversioned only when its reply is not `refused_before_writing`.
+
+- Basis: code: main `engine_utility.py: _wrote_nothing`; `main` refuses
+  before writing on more paths (`_sync_refusal`, `WeightReloadRefused`), and
+  such an update leaves the weights the version names. D11's other rules
+  stand: main `engine_core.py: EngineCore._report_held_kv_work` still starts
+  no transfer while held, and `prepare_kv_change` and
+  `scheduler.py: Scheduler.preempt_running` are unchanged where D11 edits
+  them.
+- Rejected: mark before running, as `RL` does. A refused update would then
+  block `continue_generation` on unchanged weights.
+
+### M9. `weight_version` and chat logprobs under P/D stay
+
+D8's string version stays, committed by `main`'s FINISH; `main`'s per-group
+integer version (`EngineUtilityHandler._committed_stream_versions`) counts
+LumenRL streams only, and no route carries one. #130's first-token logprob
+in the handoff stays.
+
+- Basis: code: main's engine (`atom/` outside `atom/mesh`) has no
+  `weight_version` and no `first_token_logprob`.
+  [Ruling on #111](https://github.com/junyyang-amd/ATOM/issues/111#issuecomment-6973691071):
+  A9 keeps its fresh-1P1D reference, which needs P/D logprobs.
+- Rejected: derive `weight_version` from the stream version. No client sends
+  a stream to these servers.
+
+### Follow-up tasks
+
+| Issue | Task | Depends on |
+|---|---|---|
+| #152 | Merge `main` into `RL` (`agent-team/land-as-merge`), both sides kept | none |
+| #153 | M2 to M8 | #152 |
+| #154 | A1 to A9 rerun at `RL` after #153 | #153 |
+
+Refit on a GPU may fail at #152's tip until #153 lands; #154 runs after both.
+
+### Simpler alternative and low confidence
+
+The simplest alignment resolves the merge conflicts by keeping both sides and
+nothing more. It fails A2 and A3: `main`'s engine passes `require_full` to
+`RL`'s runner methods, which do not take it.
+
+The nearer one keeps `RL`'s runner code and only passes `require_full`
+through to `update_weights`. For a refit from disk that is M7. For a trainer
+it keeps `RL`'s group beside `main`'s: two builders and two registries for
+one kind of group (principle: reuse existing code first), with an unwaited
+broadcast and no refusal under DP (M3, M4).
+
+No decision here is `low`: each rests on `main`'s code, and the group
+construction M3 adopts is the one spike #91 measured; #154 checks them on a
+GPU.
+
 ## SMG protocol: what is adopted and what differs
 
 Adopted unchanged (D1, D2):
@@ -626,7 +914,8 @@ policy, were settled by spikes #91 and #92 (D7, D11).
 | [#91](https://github.com/junyyang-amd/ATOM/issues/91) trainer group | A second RCCL group works beside ATOM's TP group at TP2 | #93 closed unmerged at 2db68bb3 |
 | [#92](https://github.com/junyyang-amd/ATOM/issues/92) PD refit in flight | D refuses an update while requests wait for remote KV; P applies; none fails | #96 closed unmerged at 15dd68e0 |
 
-No interface is upstream-only, so there is no sync issue. #95 (mooncake
+No interface was upstream-only when `RL` was built. Aligning with
+`main`'s weight sync takes the sync issue #152 (Main's weight sync). #95 (mooncake
 `rdma` on g24) is open and does not block A9 (D14).
 
 ## Summary
@@ -636,7 +925,8 @@ behind it, single instance and 1P1D, with `tools/rl/accept.py`.
 
 **Scope and non-goals**: #76's. Not built here: gRPC workers, SGLang's
 `abort` / `retract` pause modes on ATOM, FP8 packed weights across trainer
-chunks, `smg_rl_*` metrics, rewriting the registration `weight_version`.
+chunks, a chunked trainer refit while the weights are not whole (M5),
+`smg_rl_*` metrics, rewriting the registration `weight_version`.
 
 **Change per file**
 
@@ -646,11 +936,13 @@ chunks, `smg_rl_*` metrics, rewriting the registration `weight_version`.
 | `atom/mesh/src/cliargs.rs`, `src/config/types.rs` | `--enable-rl`, `--rl-control-timeout-secs`, `--rl-fanout-concurrency`; `RouterConfig.rl` | D1, D2 |
 | `atom/mesh/src/server.rs` | mount `/v1/rl` when enabled | D1 |
 | `atom/mesh/src/core/steps/worker/local/discover_metadata.rs` | ATOM `tp_size`, `dp_size` labels when RL is on | D13 |
-| `atom/model_engine/arg_utils.py`, `atom/config.py` | `--enable-rl`, `--weight-version`; runner selection | D4, D5, D8 |
-| `atom/entrypoints/openai/api_server.py` | engine routes, `/model_info`, `/generate` | D4, D9 |
-| `atom/model_engine/engine_utility.py` | new commands, `get_weight_version`, version set on commit; under P/D, the update and resume refusals | D4, D6-D8, D11 |
+| `atom/model_engine/arg_utils.py`, `atom/config.py` | `--enable-rl`, `--weight-version`; runner selection, `weight_sync_runner` | D4, D5, D8, M2 |
+| `atom/entrypoints/openai/api_server.py` | engine routes, `/model_info`, `/generate`; group routes onto `main`'s group commands | D4, D9, M3 |
+| `atom/model_engine/engine_utility.py` | new commands, `get_weight_version`, version set on commit; under P/D, the update and resume refusals; a refused trainer chunk still received | D4, D6-D8, D11, M6, M8 |
+| `atom/model_engine/engine_core_mgr.py` | a trainer chunk exempt from the refusal before any engine runs it | M6 |
+| `atom/model_engine/collective_rpc.py` | `RL`'s group methods dropped | M3 |
 | `atom/model_engine/request.py` | `RequestOutput.weight_version` | D8 |
-| `atom/rollout/model_runner_ext.py` | from-disk update; trainer group init, receive, destroy | D6, D7 |
+| `atom/rollout/model_runner_ext.py` | from-disk update; trainer chunk received on `main`'s group, `require_full` passed | D6, D7, M3-M5, M7 |
 | `atom/model_engine/scheduler.py`, `engine_core.py` | version on the scheduler and on each `RequestOutput`; PD stamp, check and `_recompute_stale_remote_kv`; parked requests on a weight change; no wait on PD sends | D8, D11 |
 | `tools/rl/accept.py` (new) | the checks below | D15 |
 | `tests/`, `atom/mesh` Rust tests | CPU tests for the new logic | principle: unit tests run without a GPU |
