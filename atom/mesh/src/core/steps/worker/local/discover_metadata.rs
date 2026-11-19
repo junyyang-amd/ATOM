@@ -304,7 +304,7 @@ async fn discover_http_openai(url: &str, api_key: Option<&str>) -> HashMap<Strin
 
     match get_openai_model_id(url, api_key).await {
         Ok(id) if !id.is_empty() => {
-            labels.insert("model_path".to_string(), id);
+            labels.insert("served_model_name".to_string(), id);
         }
         Ok(_) => {}
         Err(e) => {

@@ -52,6 +52,7 @@ pub struct MockWorker {
     config: Arc<RwLock<MockWorkerConfig>>,
     kv_event_sources: Arc<RwLock<serde_json::Value>>,
     dp_size: Arc<RwLock<Option<usize>>>,
+    model_path: Arc<RwLock<Option<String>>>,
     shutdown_handle: Option<tokio::task::JoinHandle<()>>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -62,6 +63,7 @@ impl MockWorker {
             config: Arc::new(RwLock::new(config)),
             kv_event_sources: Arc::new(RwLock::new(json!({}))),
             dp_size: Arc::new(RwLock::new(None)),
+            model_path: Arc::new(RwLock::new(None)),
             shutdown_handle: None,
             shutdown_tx: None,
         }
@@ -77,6 +79,12 @@ impl MockWorker {
         *self.dp_size.write().await = Some(dp_size);
     }
 
+    /// The model path an SGLang router discovers at `/server_info` and `/model_info`,
+    /// with no `tokenizer_path`; not served until set.
+    pub async fn set_model_path(&self, model_path: &str) {
+        *self.model_path.write().await = Some(model_path.to_string());
+    }
+
     /// Start the mock worker server
     pub async fn start(&mut self) -> Result<String, Box<dyn std::error::Error>> {
         let config = self.config.clone();
@@ -87,6 +95,8 @@ impl MockWorker {
 
         let kv_event_sources = self.kv_event_sources.clone();
         let dp_size = self.dp_size.clone();
+        let model_path = self.model_path.clone();
+        let model_info_path = self.model_path.clone();
         let app = Router::new()
             .route(
                 "/kv_event_sources",
@@ -99,9 +109,29 @@ impl MockWorker {
                 "/server_info",
                 get(move || {
                     let dp_size = dp_size.clone();
+                    let model_path = model_path.clone();
                     async move {
-                        match *dp_size.read().await {
-                            Some(dp_size) => Json(json!({"dp_size": dp_size})).into_response(),
+                        let mut info = serde_json::Map::new();
+                        if let Some(dp_size) = *dp_size.read().await {
+                            info.insert("dp_size".to_string(), json!(dp_size));
+                        }
+                        if let Some(model_path) = model_path.read().await.clone() {
+                            info.insert("model_path".to_string(), json!(model_path));
+                        }
+                        if info.is_empty() {
+                            return StatusCode::NOT_FOUND.into_response();
+                        }
+                        Json(info).into_response()
+                    }
+                }),
+            )
+            .route(
+                "/model_info",
+                get(move || {
+                    let model_path = model_info_path.clone();
+                    async move {
+                        match model_path.read().await.clone() {
+                            Some(path) => Json(json!({"model_path": path})).into_response(),
                             None => StatusCode::NOT_FOUND.into_response(),
                         }
                     }

@@ -182,10 +182,10 @@ defaults to `--backend sglang`; the Python entrypoint's `mesh-only` passes
 
 `--backend atom` also changes how the router discovers an HTTP worker's model:
 it reads `/v1/models` instead of SGLang's `/server_info` and `/model_info`, and
-the model id it returns becomes the worker's `model_path` label. For a worker
-serving under an alias (`--served-model-name`) that id is the alias, so the
-router loads the worker's tokenizer from `--tokenizer-path` or `--model-path`
-when either is set, and from the discovered label only otherwise.
+the model id it returns names the worker's model. For a worker serving under an
+alias (`--served-model-name`) that id is the alias, so the router loads the
+worker's tokenizer from `--tokenizer-path` or `--model-path` when either is
+set, and from the model id only otherwise.
 
 ### Envoy external processing
 
