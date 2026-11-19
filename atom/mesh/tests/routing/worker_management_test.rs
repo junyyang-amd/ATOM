@@ -141,8 +141,6 @@ mod worker_management_tests {
     /// tokenizer from `--tokenizer-path`, not from the alias, under `--backend atom`.
     #[tokio::test]
     async fn test_aliased_worker_tokenizer_comes_from_the_tokenizer_path() {
-        use mesh::tokenizer::traits::Encoder;
-
         let dir = tempfile::tempdir().unwrap();
         let tokenizer = json!({"version": "1.0", "truncation": null, "padding": null,
             "added_tokens": [], "normalizer": null, "pre_tokenizer": {"type": "Whitespace"},
