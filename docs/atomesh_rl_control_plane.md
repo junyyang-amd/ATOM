@@ -230,7 +230,8 @@ once, on its lowest rank), with no retry, breaker or load accounting.
 worker. ATOM workers report a static capability row: `pause_modes: [keep]`,
 `update_from: [disk, distributed]`, `abort: false`, `flush_cache: true`,
 `sleep_wake: false`, `reports_weight_version: true`; SGLang and vLLM rows are
-SMG's. `rl.*` labels override as in SMG.
+SMG's. `rl.*` labels override as in SMG; a flag label takes `true/false`,
+`1/0`, `yes/no` or `on/off` in any case, and any other value keeps the row's.
 
 - Basis: code: `core/worker.rs: WorkerMetadata.runtime_type` is gRPC-only
   and `create_worker.rs: determine_runtime_type` sets `Sglang` for every
@@ -850,7 +851,8 @@ Adopted unchanged (D1, D2):
   health, weight_version, labels, capabilities}`; `RlCapabilities {source,
   pause_modes, update_from, abort, flush_cache, sleep_wake,
   reports_weight_version}`; `RlCallOutcome {worker_id, url, status,
-  latency_ms, body, body_truncated}`; `RlFanoutResponse {results, failed,
+  latency_ms, body, body_truncated, body_error}`, where `body_error` says the
+  body failed to read after the status arrived and `body` holds what was read; `RlFanoutResponse {results, failed,
   total, succeeded}` with `RlFailedCall {worker_id, url, error, message,
   status, connection_mode}`; 200 when nothing failed, else 207
   (`crates/protocols/src/rl.rs`).
