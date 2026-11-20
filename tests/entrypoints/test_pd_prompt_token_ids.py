@@ -807,7 +807,11 @@ class TestMultimodalPD:
         assert len(pd_engine.prepared) == 1 and seq.multimodal_data is not None
 
 
-IMAGE_DECODE_KV = {"do_remote_prefill": True, "cache_seed": 9, "mrope_position_delta": -2}
+IMAGE_DECODE_KV = {
+    "do_remote_prefill": True,
+    "cache_seed": 9,
+    "mrope_position_delta": -2,
+}
 
 
 def _pd_connector(scheduler, **methods):
@@ -1079,9 +1083,7 @@ def test_handoff_keys_at_their_bounds_are_accepted(d_engine, handoff):
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("key,value", OUT_OF_RANGE_HANDOFF)
-def test_standalone_completion_refuses_an_out_of_range_handoff_key(
-    stream, key, value
-):
+def test_standalone_completion_refuses_an_out_of_range_handoff_key(stream, key, value):
     from unittest.mock import MagicMock
 
     from atom.entrypoints.atomesh.atom_standalone_service import (
