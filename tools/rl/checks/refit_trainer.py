@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime
 import time
 
-from accept import NODE_IP, PROMPTS, HarnessError, Verdict
+from accept import NODE_IP, PROMPTS, RL_API_KEY, HarnessError, Verdict
 
 ISSUE = 110
 SMG_COMMIT = "6c7bda118c5c6c02e65fe104cc8d93a0f906c965"
@@ -76,6 +76,8 @@ def trainer_argv(smg: str, mesh_url: str, checkpoint: str, port: int) -> list[st
         str(port),
         "--timeout",
         str(TRAINER_TIMEOUT_S),
+        "--api-key",
+        RL_API_KEY,
     ]
 
 

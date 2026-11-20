@@ -56,6 +56,8 @@ LONG_ROLLOUT = [
     "--request-timeout-secs",
     "14400",
 ]
+# The bearer ATOMesh's /v1/rl routes require (--rl-api-key).
+RL_API_KEY = "rl-accept-key"
 # Explicit device flags (no --privileged on this node), as ~/issue455/pd_up.sh.
 GPU_FLAGS = [
     "--network", "host", "--ipc", "host", "--shm-size", "32g",
@@ -97,10 +99,15 @@ class Verdict:
     data: dict = field(default_factory=dict)
 
 
-def http(method: str, url: str, body=None, timeout: float = CONTROL_TIMEOUT_S):
-    """(status, parsed JSON or text) of one call; an HTTP error is an answer."""
+def http(
+    method: str, url: str, body=None, timeout: float = CONTROL_TIMEOUT_S, token=None
+):
+    """(status, parsed JSON or text) of one call, with ``token`` as its bearer;
+    an HTTP error is an answer."""
     data = None if body is None else json.dumps(body).encode()
     headers = {} if data is None else {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -240,13 +247,15 @@ class Harness:
         self.sh(argv)
         return name
 
-    def wait_ready(self, name: str, url: str, path="/health", ok=lambda body: True):
+    def wait_ready(
+        self, name: str, url: str, path="/health", ok=lambda body: True, token=None
+    ):
         if self.dry_run:
             return
         deadline = time.monotonic() + READY_TIMEOUT_S
         while time.monotonic() < deadline:
             try:
-                status, body = http("GET", url + path, timeout=10)
+                status, body = http("GET", url + path, timeout=10, token=token)
                 if status == 200 and ok(body):
                     return
             except OSError:
@@ -474,6 +483,8 @@ class Harness:
             "--policy",
             "round_robin",
             *LONG_ROLLOUT,
+            "--rl-api-key",
+            RL_API_KEY,
         ]
         if pd:
             args += ["--pd-disaggregation", "--prefill", urls[0], "--decode", urls[1]]
@@ -496,11 +507,11 @@ class Harness:
         def listed(body) -> bool:
             return isinstance(body, dict) and body.get("total") == len(urls)
 
-        self.wait_ready(name, self.mesh_url, "/v1/rl/workers", listed)
+        self.wait_ready(name, self.mesh_url, "/v1/rl/workers", listed, RL_API_KEY)
         return self.mesh_url
 
     def call_mesh(self, method: str, path: str, body=None):
-        return http(method, self.mesh_url + path, body)
+        return http(method, self.mesh_url + path, body, token=RL_API_KEY)
 
     def rl_fanout(self, path: str, body, selector: str):
         query = urllib.parse.urlencode({"selector": selector})
