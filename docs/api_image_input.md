@@ -74,6 +74,10 @@ only together with `do_remote_prefill` and `cache_seed`. Such a D request
 cannot fall back to a local prefill, as it has no image to prefill: when it
 would (D has no KV connector, or the KV it received is gone after a
 preemption or a KV change), it finishes with an `unschedulable` reason.
+A D whose KV connector has an offload tier (a `multi` connector, as
+`ATOM_KV_OFFLOAD` sets up beside a P/D connector) resumes every received KV
+as a local prefill, so it finishes every such request: that configuration
+cannot serve an image decode leg.
 
 ## Public URLs
 
