@@ -16,11 +16,7 @@ use super::{
 };
 use crate::{
     config::BackendType,
-    core::{
-        worker::{RuntimeType, WorkerType},
-        worker_registry::WorkerId,
-        ConnectionMode, Worker,
-    },
+    core::{worker_registry::WorkerId, ConnectionMode, Worker},
     server::AppState,
 };
 
@@ -68,18 +64,7 @@ impl RlWorkerInfo {
                 "http",
                 Some(worker.base_url().to_string()),
             ),
-            ConnectionMode::Grpc { .. } => {
-                let engine = match metadata.runtime_type {
-                    RuntimeType::Sglang => "sglang",
-                    RuntimeType::Vllm => "vllm",
-                };
-                (engine.to_string(), "grpc", None)
-            }
-        };
-        let worker_type = match worker.worker_type() {
-            WorkerType::Regular => "regular",
-            WorkerType::Prefill { .. } => "prefill",
-            WorkerType::Decode => "decode",
+            ConnectionMode::Grpc { .. } => (metadata.runtime_type.to_string(), "grpc", None),
         };
         Self {
             id: id.as_str().to_string(),
@@ -87,7 +72,7 @@ impl RlWorkerInfo {
             base_url: worker.base_url().to_string(),
             engine,
             model_id: worker.model_id().to_string(),
-            worker_type: worker_type.to_string(),
+            worker_type: worker.worker_type().as_metric_label().to_string(),
             connection_mode: connection_mode.to_string(),
             health: if worker.is_healthy() {
                 "ready"
@@ -146,21 +131,6 @@ pub fn collapse(workers: Vec<RlWorkerInfo>) -> Vec<(RlWorkerInfo, usize)> {
     let mut rows: Vec<(RlWorkerInfo, usize)> = groups.into_values().collect();
     rows.sort_by(|a, b| a.0.base_url.cmp(&b.0.base_url).then(a.0.url.cmp(&b.0.url)));
     rows
-}
-
-/// The worker's labels plus the keys a selector can match on; those keys
-/// shadow labels of the same name.
-pub fn merged_labels(info: &RlWorkerInfo) -> HashMap<String, String> {
-    let mut m = info.labels.clone();
-    m.insert("id".to_string(), info.id.clone());
-    m.insert("url".to_string(), info.url.clone());
-    m.insert("base_url".to_string(), info.base_url.clone());
-    m.insert("engine".to_string(), info.engine.clone());
-    m.insert("model".to_string(), info.model_id.clone());
-    m.insert("worker_type".to_string(), info.worker_type.clone());
-    m.insert("connection_mode".to_string(), info.connection_mode.clone());
-    m.insert("health".to_string(), info.health.clone());
-    m
 }
 
 /// One row of `GET /v1/rl/workers` for `info`, with `dp_ranks` collapsed into it.
