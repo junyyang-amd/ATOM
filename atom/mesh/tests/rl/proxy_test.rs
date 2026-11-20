@@ -1,10 +1,14 @@
 //! `/v1/rl/workers/{id}/engine/{*path}` through `build_app`, over workers in
-//! the real registry, and the `tp_size` / `dp_size` labels discovery reads
-//! from an ATOM worker with `--enable-rl`.
+//! the real registry.
 
 use std::sync::Arc;
 
-use axum::{body::Body, extract::Request, http::StatusCode, Router};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::{header::AUTHORIZATION, HeaderValue, StatusCode},
+    Router,
+};
 use mesh::{
     config::{BackendType, RouterConfig},
     core::{BasicWorkerBuilder, ConnectionMode, Worker},
@@ -21,7 +25,14 @@ use crate::common::{
     AppTestContext, TestRouterConfig,
 };
 
-async fn send(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
+pub(super) const RL_KEY: &str = "rl-proxy-key";
+
+/// Sends `request` with the `/v1/rl` bearer.
+pub(super) async fn send(app: &Router, mut request: Request<Body>) -> (StatusCode, Value) {
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {RL_KEY}")).unwrap(),
+    );
     let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -44,10 +55,11 @@ fn mock_worker() -> MockWorker {
     })
 }
 
-fn rl_config(rl_enabled: bool, control_timeout_secs: u64) -> RouterConfig {
+fn rl_config(control_timeout_secs: u64) -> RouterConfig {
     let mut config = TestRouterConfig::random(3994);
     config.backend = BackendType::Atom;
-    config.rl.enabled = rl_enabled;
+    config.rl.enabled = true;
+    config.rl.api_key = Some(RL_KEY.to_string());
     config.rl.control_timeout_secs = control_timeout_secs;
     config
 }
@@ -78,7 +90,7 @@ async fn register(ctx: &AppTestContext, app: &Router, worker: Value) -> String {
 
 /// Puts `worker` straight into the registry, for workers `POST /workers`
 /// cannot add (a gRPC worker, a dead address).
-fn insert(ctx: &AppTestContext, worker: BasicWorkerBuilder) -> String {
+pub(super) fn insert(ctx: &AppTestContext, worker: BasicWorkerBuilder) -> String {
     let worker: Arc<dyn Worker> = Arc::new(worker.build());
     ctx.app_context
         .worker_registry
@@ -91,7 +103,7 @@ fn insert(ctx: &AppTestContext, worker: BasicWorkerBuilder) -> String {
 async fn rl_proxy_forwards_body_bytes_and_headers_verbatim() {
     let mut worker = mock_worker();
     let url = worker.start().await.unwrap();
-    let ctx = AppTestContext::new_with_config(rl_config(true, 5), vec![]).await;
+    let ctx = AppTestContext::new_with_config(rl_config(5), vec![]).await;
     let app = ctx.create_app().await;
     let id = register(&ctx, &app, json!({"url": url, "api_key": "engine-secret"})).await;
 
@@ -100,7 +112,6 @@ async fn rl_proxy_forwards_body_bytes_and_headers_verbatim() {
         "/v1/rl/workers/{id}/engine/rl_echo?mode=keep&selector=engine%3Datom&level=2"
     ))
     .header("content-type", "application/json; charset=utf-8")
-    .header("authorization", "Bearer caller-token")
     .header("x-request-id", "req-1")
     .header(
         "traceparent",
@@ -161,7 +172,7 @@ async fn rl_proxy_forwards_body_bytes_and_headers_verbatim() {
 async fn rl_proxy_relays_an_engine_500_as_an_outcome() {
     let mut worker = mock_worker();
     let url = worker.start().await.unwrap();
-    let ctx = AppTestContext::new_with_config(rl_config(true, 5), vec![]).await;
+    let ctx = AppTestContext::new_with_config(rl_config(5), vec![]).await;
     let app = ctx.create_app().await;
     let id = register(&ctx, &app, json!({"url": url})).await;
 
@@ -174,6 +185,10 @@ async fn rl_proxy_relays_an_engine_500_as_an_outcome() {
     assert_eq!(outcome["status"], 500);
     assert_eq!(outcome["worker_id"], id);
     assert_eq!(outcome["body"]["method"], "POST");
+    // A worker without a key gets no `authorization`: the caller's `/v1/rl`
+    // bearer never reaches the engine.
+    let headers = &outcome["body"]["headers"];
+    assert!(headers.get("authorization").is_none(), "{headers}");
 
     ctx.shutdown().await;
     worker.stop().await;
@@ -183,7 +198,7 @@ async fn rl_proxy_relays_an_engine_500_as_an_outcome() {
 async fn rl_proxy_times_out_with_504_upstream_timeout() {
     let mut worker = mock_worker();
     let url = worker.start().await.unwrap();
-    let ctx = AppTestContext::new_with_config(rl_config(true, 1), vec![]).await;
+    let ctx = AppTestContext::new_with_config(rl_config(1), vec![]).await;
     let app = ctx.create_app().await;
     let id = register(&ctx, &app, json!({"url": url})).await;
 
@@ -205,7 +220,7 @@ async fn rl_proxy_times_out_with_504_upstream_timeout() {
 async fn rl_proxy_truncates_a_body_past_the_cap() {
     let mut worker = mock_worker();
     let url = worker.start().await.unwrap();
-    let ctx = AppTestContext::new_with_config(rl_config(true, 5), vec![]).await;
+    let ctx = AppTestContext::new_with_config(rl_config(5), vec![]).await;
     let app = ctx.create_app().await;
     let id = register(&ctx, &app, json!({"url": url})).await;
 
@@ -253,7 +268,7 @@ pub(super) async fn cut_engine() -> String {
 #[tokio::test]
 async fn rl_proxy_keeps_the_status_when_the_body_read_fails() {
     let url = cut_engine().await;
-    let ctx = AppTestContext::new_with_config(rl_config(true, 5), vec![]).await;
+    let ctx = AppTestContext::new_with_config(rl_config(5), vec![]).await;
     let app = ctx.create_app().await;
     let id = insert(&ctx, BasicWorkerBuilder::new(&url));
 
@@ -275,7 +290,7 @@ async fn rl_proxy_keeps_the_status_when_the_body_read_fails() {
 async fn rl_proxy_errors_carry_smg_statuses() {
     let mut worker = mock_worker();
     let url = worker.start().await.unwrap();
-    let ctx = AppTestContext::new_with_config(rl_config(true, 5), vec![]).await;
+    let ctx = AppTestContext::new_with_config(rl_config(5), vec![]).await;
     let app = ctx.create_app().await;
     let id = register(&ctx, &app, json!({"url": url})).await;
     let grpc = insert(
@@ -308,49 +323,6 @@ async fn rl_proxy_errors_carry_smg_statuses() {
 
     ctx.shutdown().await;
     worker.stop().await;
-}
-
-#[tokio::test]
-async fn rl_discovery_labels_atom_tp_size_only_with_rl_on() {
-    for rl_enabled in [true, false] {
-        let mut worker = mock_worker();
-        let url = worker.start().await.unwrap();
-        worker.set_tp_size(2).await;
-        let ctx = AppTestContext::new_with_config(rl_config(rl_enabled, 5), vec![]).await;
-        let app = ctx.create_app().await;
-        let id = register(&ctx, &app, json!({"url": url})).await;
-
-        let labels = ctx
-            .app_context
-            .worker_registry
-            .get(&mesh::core::worker_registry::WorkerId::from_string(
-                id.clone(),
-            ))
-            .unwrap()
-            .metadata()
-            .labels
-            .clone();
-        if rl_enabled {
-            assert_eq!(labels.get("tp_size").map(String::as_str), Some("2"));
-            assert!(!labels.contains_key("dp_size"), "/server_info served none");
-            let request = Request::get(format!("/v1/rl/workers/{id}"))
-                .body(Body::empty())
-                .unwrap();
-            let (status, row) = send(&app, request).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(row["tp_size"], 2);
-        } else {
-            assert!(!labels.contains_key("tp_size"), "{labels:?}");
-            assert!(!labels.contains_key("dp_size"), "{labels:?}");
-        }
-        assert_eq!(
-            labels.get("model_path").map(String::as_str),
-            Some("mock-model")
-        );
-
-        ctx.shutdown().await;
-        worker.stop().await;
-    }
 }
 
 #[test]

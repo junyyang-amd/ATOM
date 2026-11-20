@@ -11,6 +11,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RlError {
+    #[error("missing or wrong `Authorization: Bearer` token")]
+    Unauthorized,
     #[error("invalid engine path: {0}")]
     InvalidEnginePath(String),
     #[error("a non-empty `selector` query parameter is required")]
@@ -48,6 +50,7 @@ impl RlError {
     /// Stable machine-readable code for the JSON body.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Unauthorized => "unauthorized",
             Self::InvalidEnginePath(_) => "invalid_engine_path",
             Self::SelectorRequired => "selector_required",
             Self::InvalidSelector { .. } => "invalid_selector",
@@ -61,6 +64,7 @@ impl RlError {
 
     pub fn status(&self) -> StatusCode {
         match self {
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::InvalidEnginePath(_)
             | Self::SelectorRequired
             | Self::InvalidSelector { .. }
@@ -76,7 +80,7 @@ impl RlError {
     pub fn to_json(&self) -> Value {
         let mut body = json!({ "error": self.code(), "message": self.to_string() });
         match self {
-            Self::InvalidEnginePath(_) | Self::SelectorRequired => {}
+            Self::Unauthorized | Self::InvalidEnginePath(_) | Self::SelectorRequired => {}
             Self::InvalidSelector { offset, .. } => body["offset"] = json!(offset),
             Self::NoWorkersMatch(selector) => body["selector"] = json!(selector),
             Self::WorkerNotFound(id) => body["id"] = json!(id),

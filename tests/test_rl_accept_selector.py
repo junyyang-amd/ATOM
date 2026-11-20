@@ -185,3 +185,10 @@ def test_a_busy_gpu_is_found_by_its_hip_index(monkeypatch, hip, busy):
             h.refuse_busy([hip])
     else:
         h.refuse_busy([hip])
+
+
+def test_smg_client_presents_the_rl_bearer(models, monkeypatch, capsys):
+    monkeypatch.setattr(accept.subprocess, "run", pytest.fail)
+    assert accept.main(["smg_client", "--dry-run", "--smg", "/smg"]) == 0
+    script = shlex.split(capsys.readouterr().out.splitlines()[-1])
+    assert script[script.index("--api-key") + 1] == accept.RL_API_KEY

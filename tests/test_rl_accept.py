@@ -312,3 +312,42 @@ def test_equals_fresh_asks_a_prefix_once_per_server(fresh):
     h, outputs = accept.Harness(107), [{"output_ids": [0]}]
     assert all(h.equals_fresh("u", checkpoint, ["p"], outputs)["equal"] for _ in "xy")
     assert asked == [[7, 8]]
+
+
+class _Answer:
+    """What ``urlopen`` returns: a 200 with a JSON body."""
+
+    status = 200
+
+    def __init__(self, body):
+        self._raw = json.dumps(body).encode()
+
+    def read(self):
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_atomesh_runs_with_the_rl_bearer_and_every_mesh_call_carries_it(monkeypatch):
+    sent = []
+
+    def urlopen(req, timeout):
+        sent.append((req.full_url, req.get_header("Authorization")))
+        return _Answer({"total": 1})
+
+    monkeypatch.setattr(accept.urllib.request, "urlopen", urlopen)
+    h = accept.Harness(106)
+    ran = []
+    monkeypatch.setattr(h, "sh", lambda argv, check=True: ran.append(argv) or "")
+    monkeypatch.setattr(accept.socket.socket, "connect_ex", lambda self, addr: 1)
+    mesh = h.start_mesh(["http://w0"])
+    h.call_mesh("GET", "/v1/rl/workers")
+    launch = next(argv for argv in ran if "launch" in argv)
+    key = launch.index("--rl-api-key")
+    assert launch[key + 1] == accept.RL_API_KEY
+    bearer = f"Bearer {accept.RL_API_KEY}"
+    assert sent == [(mesh + "/v1/rl/workers", bearer)] * 2

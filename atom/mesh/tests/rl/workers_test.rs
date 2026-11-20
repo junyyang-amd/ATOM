@@ -5,7 +5,10 @@
 use axum::{
     body::Body,
     extract::Request,
-    http::{header::CONTENT_TYPE, StatusCode},
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        StatusCode,
+    },
     Router,
 };
 use clap::Parser;
@@ -22,14 +25,29 @@ use crate::common::{
     AppTestContext, TestRouterConfig,
 };
 
+const RL_KEY: &str = "rl-test-key";
+
 async fn call(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+    call_as(app, method, uri, body, Some(&format!("Bearer {RL_KEY}"))).await
+}
+
+/// `call` with `Authorization: <authorization>`, or no such header.
+async fn call_as(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    authorization: Option<&str>,
+) -> (StatusCode, Value) {
     let body = body.map_or_else(Body::empty, |body| Body::from(body.to_string()));
-    let request = Request::builder()
+    let mut request = Request::builder()
         .method(method)
         .uri(uri)
-        .header(CONTENT_TYPE, "application/json")
-        .body(body)
-        .unwrap();
+        .header(CONTENT_TYPE, "application/json");
+    if let Some(authorization) = authorization {
+        request = request.header(AUTHORIZATION, authorization);
+    }
+    let request = request.body(body).unwrap();
     let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -53,6 +71,7 @@ fn rl_config(backend: BackendType, dp_aware: bool) -> RouterConfig {
     config.backend = backend;
     config.dp_aware = dp_aware;
     config.rl.enabled = true;
+    config.rl.api_key = Some(RL_KEY.to_string());
     config
 }
 
@@ -87,6 +106,8 @@ async fn rl_workers_lists_atom_workers_with_smg_fields() {
     let mut urls = Vec::new();
     for worker in &mut workers {
         urls.push(worker.start().await.unwrap());
+        worker.set_tp_size(4).await;
+        worker.set_dp_size(2).await;
     }
     urls.sort();
     let ctx = AppTestContext::new_with_config(rl_config(BackendType::Atom, false), vec![]).await;
@@ -120,15 +141,10 @@ async fn rl_workers_lists_atom_workers_with_smg_fields() {
                 "update_from": ["disk", "distributed"], "abort": false, "flush_cache": true,
                 "sleep_wake": false, "reports_weight_version": true})
         );
-        for key in [
-            "engine_version",
-            "model_id",
-            "tp_size",
-            "dp_size",
-            "pp_size",
-        ] {
-            assert!(row.get(key).is_some(), "{key} missing from {row}");
-        }
+        assert_eq!(row["tp_size"], 4, "read from the worker's /server_info");
+        assert_eq!(row["dp_size"], 2, "read from the worker's /server_info");
+        assert_eq!(row["pp_size"], Value::Null);
+        assert_eq!(row["engine_version"], Value::Null);
     }
     assert_eq!(rows[0]["weight_version"], "v0");
     assert_eq!(rows[0]["role"], "actor");
@@ -150,13 +166,16 @@ async fn rl_workers_lists_atom_workers_with_smg_fields() {
 async fn rl_workers_reports_sglang_with_its_capability_row() {
     let mut worker = mock_worker();
     let url = worker.start().await.unwrap();
+    worker.set_tp_size(2).await;
+    worker.set_dp_size(3).await;
     let ctx = AppTestContext::new_with_config(rl_config(BackendType::Sglang, false), vec![]).await;
     let app = ctx.create_app().await;
     register(&ctx, &app, &url, json!({}), 1).await;
 
     let row = &rl_workers(&app).await["workers"][0];
     assert_eq!(row["engine"], "sglang");
-    assert_eq!(row["tp_size"], 1, "read from the worker's /get_server_info");
+    assert_eq!(row["tp_size"], 2, "read from the worker's /server_info");
+    assert_eq!(row["dp_size"], 3, "read from the worker's /server_info");
     assert_eq!(
         row["capabilities"]["pause_modes"],
         json!(["abort", "retract", "in_place"])
@@ -232,8 +251,53 @@ async fn rl_off_mounts_no_route() {
     ctx.shutdown().await;
 }
 
+#[tokio::test]
+async fn rl_routes_require_the_bearer_token() {
+    let ctx = AppTestContext::new_with_config(rl_config(BackendType::Atom, false), vec![]).await;
+    let app = ctx.create_app().await;
+    let refused = [
+        None,
+        Some("Bearer "),
+        Some("Bearer wrong"),
+        Some("Bearer rl-test-ke"),
+        Some(RL_KEY),
+        Some("Basic rl-test-key"),
+    ];
+    for uri in [
+        "/v1/rl/workers",
+        "/v1/rl/workers/nope",
+        "/v1/rl/workers/nope/engine/flush_cache",
+        "/v1/rl/engine/flush_cache?selector=engine%3Datom",
+    ] {
+        for authorization in refused {
+            let (status, body) = call_as(&app, "GET", uri, None, authorization).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri} {authorization:?}");
+            assert_eq!(body["error"], "unauthorized", "{uri} {authorization:?}");
+        }
+    }
+    for scheme in ["Bearer", "bearer", "BEARER"] {
+        let authorization = format!("{scheme} {RL_KEY}");
+        let (status, _) = call_as(&app, "GET", "/v1/rl/workers", None, Some(&authorization)).await;
+        assert_eq!(status, StatusCode::OK, "{authorization}");
+    }
+    ctx.shutdown().await;
+}
+
+#[tokio::test]
+async fn rl_routes_without_a_configured_key_refuse_every_request() {
+    let mut config = rl_config(BackendType::Atom, false);
+    config.rl.api_key = None;
+    let ctx = AppTestContext::new_with_config(config, vec![]).await;
+    let app = ctx.create_app().await;
+    for authorization in [None, Some("Bearer ")] {
+        let (status, _) = call_as(&app, "GET", "/v1/rl/workers", None, authorization).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{authorization:?}");
+    }
+    ctx.shutdown().await;
+}
+
 #[test]
-fn rl_flags_parse_to_defaults_and_reject_zero() {
+fn rl_flags_parse_to_defaults_and_require_the_key() {
     let config = CliArgs::try_parse_from(["atomesh"])
         .unwrap()
         .to_router_config(Vec::new())
@@ -242,10 +306,12 @@ fn rl_flags_parse_to_defaults_and_reject_zero() {
         config.rl,
         RlConfig {
             enabled: false,
+            api_key: None,
             control_timeout_secs: 600,
             fanout_concurrency: 32,
         }
     );
+    assert_eq!(config.rl, RlConfig::default());
 
     let args = |extra: &[&str]| {
         let argv = ["atomesh", "--enable-rl"].iter().chain(extra);
@@ -254,6 +320,8 @@ fn rl_flags_parse_to_defaults_and_reject_zero() {
             .to_router_config(Vec::new())
     };
     let config = args(&[
+        "--rl-api-key",
+        "k",
         "--rl-control-timeout-secs",
         "7",
         "--rl-fanout-concurrency",
@@ -264,12 +332,20 @@ fn rl_flags_parse_to_defaults_and_reject_zero() {
         config.rl,
         RlConfig {
             enabled: true,
+            api_key: Some("k".to_string()),
             control_timeout_secs: 7,
             fanout_concurrency: 3,
         }
     );
-    for flag in ["--rl-control-timeout-secs", "--rl-fanout-concurrency"] {
-        let error = args(&[flag, "0"]).unwrap_err().to_string();
-        assert!(error.contains("rl."), "{flag}: {error}");
+    for missing in [&[][..], &["--rl-api-key", ""], &["--rl-api-key", " "]] {
+        let error = args(missing).unwrap_err().to_string();
+        assert!(error.contains("--rl-api-key"), "{missing:?}: {error}");
+    }
+    for field in ["control_timeout_secs", "fanout_concurrency"] {
+        let flag = format!("--rl-{}", field.replace('_', "-"));
+        let error = args(&[&flag, "0", "--rl-api-key", "k"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("rl.{field}")), "{error}");
     }
 }

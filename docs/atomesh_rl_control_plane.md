@@ -139,7 +139,7 @@ accept.py timing  reads both JSON files      -> PASS when each holds a time
 ### A7: stability (goal 6)
 
 ```text
-ATOMesh: --enable-rl --disable-health-check --disable-circuit-breaker --request-timeout-secs 14400
+ATOMesh: --enable-rl --rl-api-key <key> --disable-health-check --disable-circuit-breaker --request-timeout-secs 14400
 repeat 20 rounds:
   pause -> update_weights_from_disk (alternate checkpoints) -> continue
   64 concurrent /generate rollouts
@@ -490,7 +490,9 @@ which A9 forbids.
 
 `--enable-rl` changes no other default. Every check launches ATOMesh with
 `--enable-rl --disable-health-check --disable-circuit-breaker
---request-timeout-secs 14400`, SMG's documented profile.
+--request-timeout-secs 14400`, SMG's documented profile, plus the
+`--rl-api-key` that `--enable-rl` requires; `accept.py` presents it as the
+bearer of every `/v1/rl` call and passes it to SMG's scripts as `--api-key`.
 
 - Basis: code: `cliargs.rs` has `disable_health_check`,
   `disable_circuit_breaker`, `request_timeout_secs` (default 1800).
@@ -845,7 +847,7 @@ Adopted unchanged (D1, D2):
 - Selector grammar and matching (`selector.rs: Selector`): `=`, `!=`, `in`,
   `notin`, comma as AND, over the worker's labels plus `id`, `url`,
   `base_url`, `engine`, `model`, `worker_type`, `connection_mode`, `health`
-  (`discovery.rs: merged_labels`).
+  (`selector.rs: merged_labels`).
 - Forwarding: body verbatim; `Content-Type` kept or set to JSON;
   `x-request-id`, `traceparent`, `tracestate` forwarded; the worker's own
   API key sent as bearer; 1 MiB response cap with `body_truncated`.
@@ -864,13 +866,14 @@ Adopted unchanged (D1, D2):
   (`selector`) at 400; `worker_not_found` 404; `no_control_endpoint` 422;
   `upstream_unreachable` 502; `upstream_timeout` 504 (`error.rs: RlError`).
 - Flags: `--enable-rl`, `--rl-control-timeout-secs` (600),
-  `--rl-fanout-concurrency` (32), each non-zero (`config.rs: RlConfig`).
+  `--rl-fanout-concurrency` (32), each non-zero, and `--rl-api-key`
+  (`config.rs: RlConfig`).
 
 Differences, each with its reason:
 
 | SMG | ATOMesh | Reason |
 |---|---|---|
-| Routes nested under `apply_control_plane_auth` | No auth layer | ATOMesh has none; its admin routes run without one. |
+| Routes nested under `apply_control_plane_auth` | Every `/v1/rl` route requires `Authorization: Bearer <--rl-api-key>` (scheme in any case), else 401 `unauthorized`; `--enable-rl` without the key fails at startup (`mod.rs: router`, `config/validation.rs`) | ATOMesh has no control-plane auth to nest under, and a control call carries each worker's API key, so only the token's holder may make ATOMesh act with those keys. |
 | `engine` from the worker's `RuntimeType` | From `--backend` for HTTP workers (D3) | ATOMesh's HTTP workers carry no runtime type. |
 | Capability rows for SGLang, vLLM, TokenSpeed | Adds an `atom` row (D3) | ATOM is a new engine. |
 | gRPC / ZMQ workers via `rl.control_url`, `RlControlCalls`; `invalid_body` 400 when such a call's body is not a JSON object (`proxy.rs: call_over_engine_connection`) | HTTP workers only; others answer `no_control_endpoint`, so `invalid_body` is never answered | gRPC workers are a non-goal; the HTTP path forwards the body verbatim and never parses it. |
@@ -940,7 +943,7 @@ chunks, a chunked trainer refit while the weights are not whole (M5),
 | File | Change | Decisions |
 |---|---|---|
 | `atom/mesh/src/rl/` (new) | selector, discovery, proxy, fanout, error, capability | D1-D3 |
-| `atom/mesh/src/cliargs.rs`, `src/config/types.rs` | `--enable-rl`, `--rl-control-timeout-secs`, `--rl-fanout-concurrency`; `RouterConfig.rl` | D1, D2 |
+| `atom/mesh/src/cliargs.rs`, `src/config/types.rs` | `--enable-rl`, `--rl-api-key`, `--rl-control-timeout-secs`, `--rl-fanout-concurrency`; `RouterConfig.rl` | D1, D2 |
 | `atom/mesh/src/server.rs` | mount `/v1/rl` when enabled | D1 |
 | `atom/mesh/src/core/steps/worker/local/discover_metadata.rs` | ATOM `tp_size`, `dp_size` labels when RL is on | D13 |
 | `atom/model_engine/arg_utils.py`, `atom/config.py` | `--enable-rl`, `--weight-version`; runner selection, `weight_sync_runner` | D4, D5, D8, M2 |

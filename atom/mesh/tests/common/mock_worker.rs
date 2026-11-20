@@ -153,9 +153,9 @@ impl MockWorker {
                 post(responses_cancel_handler),
             )
             .route("/flush_cache", post(flush_cache_handler))
-            .route("/v1/models", get(v1_models_handler))
             .route("/rl_echo", get(rl_echo.clone()).post(rl_echo))
             .route("/rl_slow", post(rl_slow_handler))
+            .route("/v1/models", get(v1_models_handler))
             .with_state(config);
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

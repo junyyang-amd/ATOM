@@ -231,3 +231,8 @@ def test_timing_fails_without_a_trainer_time(
     if trainer_data is not None:
         _record(on_node, "refit_trainer", trainer_data)
     assert _run(monkeypatch, capsys, "timing") == (1, f"FAIL timing: {reason}")
+
+
+def test_trainer_presents_the_rl_bearer():
+    argv = refit_trainer.trainer_argv("/smg", "http://mesh", "/ckpt", 1)
+    assert argv[argv.index("--api-key") + 1] == accept.RL_API_KEY

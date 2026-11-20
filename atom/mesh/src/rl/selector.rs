@@ -1,9 +1,24 @@
 //! The fan-out selector: `k=v`, `k!=v`, `k in (a,b)`, `k notin (a,b)`, comma
-//! as AND, matched exactly against `discovery::merged_labels`.
+//! as AND, matched exactly against `merged_labels`.
 
 use std::collections::HashMap;
 
-use super::error::RlError;
+use super::{discovery::RlWorkerInfo, error::RlError};
+
+/// The worker's labels plus the keys a selector can match on; those keys
+/// shadow labels of the same name.
+pub fn merged_labels(info: &RlWorkerInfo) -> HashMap<String, String> {
+    let mut m = info.labels.clone();
+    m.insert("id".to_string(), info.id.clone());
+    m.insert("url".to_string(), info.url.clone());
+    m.insert("base_url".to_string(), info.base_url.clone());
+    m.insert("engine".to_string(), info.engine.clone());
+    m.insert("model".to_string(), info.model_id.clone());
+    m.insert("worker_type".to_string(), info.worker_type.clone());
+    m.insert("connection_mode".to_string(), info.connection_mode.clone());
+    m.insert("health".to_string(), info.health.clone());
+    m
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Op {

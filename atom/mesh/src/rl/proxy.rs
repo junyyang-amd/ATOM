@@ -31,7 +31,8 @@ use crate::{core::worker_registry::WorkerId, server::AppState};
 pub const BODY_CAP: usize = 1 << 20;
 
 /// Request headers copied to the engine. The caller's `authorization` is not
-/// one: it is the caller's credential to ATOMesh, not to the engine.
+/// one: it carries the `--rl-api-key` bearer the router checked; the engine
+/// gets the worker's own key instead.
 const FORWARDED_HEADERS: &[&str] = &["x-request-id", "traceparent", "tracestate"];
 
 /// A caller's request, ready to replay against any worker.

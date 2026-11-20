@@ -17,11 +17,11 @@ use serde::Deserialize;
 use tracing::info;
 
 use super::{
-    discovery::{collapse, merged_labels, RlWorkerInfo},
+    discovery::{collapse, RlWorkerInfo},
     error::RlError,
     protocol::{RlCallOutcome, RlFailedCall, RlFanoutResponse},
     proxy::{call_worker, ProxyRequest},
-    selector::Selector,
+    selector::{merged_labels, Selector},
 };
 use crate::server::AppState;
 

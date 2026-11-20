@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import shlex
 
-from accept import HarnessError, Verdict
+from accept import RL_API_KEY, HarnessError, Verdict
 from checks.refit_disk import launch
 
 ISSUE = 108
@@ -32,6 +32,8 @@ def script(h, new: str) -> list[str]:
         h.mesh_url,
         "--model-path",
         new,
+        "--api-key",
+        RL_API_KEY,
         "--weight-version",
         VERSION,
         "--selector",
