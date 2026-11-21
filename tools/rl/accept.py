@@ -38,7 +38,7 @@ TREE = Path(__file__).resolve().parents[2]
 OUT_DIR = Path("/share_nfs/junyan_tmp_r120/rl-accept")
 HF_HOME = "/share_nfs/junyan_tmp_r120/hf"
 GATE_DIR = "/var/tmp/junyan_agent_team_gate"
-ATOM_IMAGE = "rocm/atom-dev:nightly_202611081546"
+ATOM_IMAGE = "rocm/atom-dev:nightly_202611200431"
 # lmsysorg/sglang-rocm is untagged on the node; this is its image id.
 SGLANG_IMAGE = "sha256:2456fff6cfaffb822026d089a0629a4859c84d2448864ffd6d5fa4f945ef2c86"
 MESH_IMAGE = "atom-gate:local"
