@@ -272,12 +272,13 @@ comma lists; `rl.abort`, `rl.flush_cache`, `rl.sleep_wake`,
 `rl.reports_weight_version` as `true/false`, `1/0`, `yes/no` or `on/off` in
 any case; any other value keeps the table's). For `--backend atom`,
 discovery also reads `tp_size` and `dp_size` from each worker's
-`/server_info`, so a trainer can lay out ranks. A gRPC worker lists with no
-`control_url`: it cannot be controlled through `/v1/rl`, and a control call
-to it answers 422 `no_control_endpoint`.
+`/server_info`, so a trainer can lay out ranks. A gRPC worker lists with
+`control_url: null`: it cannot be controlled through `/v1/rl`, and a control
+call to it answers 422 `no_control_endpoint`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--enable-rl` | off | Mount the `/v1/rl` routes |
 | `--rl-api-key` | none | Bearer token the `/v1/rl` routes require; required with `--enable-rl` |
 | `--rl-control-timeout-secs` | 600 | Total timeout of one engine control call; a refit can take minutes |
 | `--rl-fanout-concurrency` | 32 | Engine calls in flight at once during a fan-out |
