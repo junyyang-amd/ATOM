@@ -133,8 +133,10 @@ def test_pd_fails_a_completion_that_finishes_with_no_token(
     code, out = _run(monkeypatch, capsys, "pd", harness)
     assert (code, out) == (
         1,
-        "FAIL pd: in flight ended {'completed': 63, 'failed': 1}, errors "
-        "[\"HarnessError: finished 'length' with no token\"]",
+        (
+            "FAIL pd: in flight ended {'completed': 63, 'failed': 1}, errors "
+            "[\"HarnessError: finished 'length' with no token\"]"
+        ),
     )
 
 

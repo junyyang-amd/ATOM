@@ -17,7 +17,6 @@ from test_kv_change import _engine, _run, _Runners, _running, _wired
 from test_pd_admission import receive_success
 
 from atom.kv_transfer.disaggregation.types import KVConnectorOutput
-from atom.kv_transfer.disaggregation.types import KVConnectorOutput
 from atom.model_engine.engine_utility import (
     PAUSE_GENERATION_CMD,
     RESUME_GENERATION_CMD,
