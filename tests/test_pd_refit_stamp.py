@@ -143,9 +143,9 @@ def test_a_stale_stamp_waits_for_its_transfer_to_finish(build):
 
 
 def test_a_receive_failing_across_a_refit_prefills_on_d(build, monkeypatch):
-    """P's send times out while D is paused for its refit, so the failure
-    arrives before D's version changes; D resumes on new weights and prefills
-    the request rather than abort it."""
+    """P's send times out across D's refit and the failure arrives before
+    D's version changes; D resumes on new weights and prefills the request
+    rather than abort it."""
     sched, request = build()
     sched.weight_version = "v1"
     seq = _parked(sched, request, "v1")

@@ -469,11 +469,12 @@ which A9 forbids.
 A transfer can fail across a refit: Mooncake times a send out after 30 s,
 and a refit can take longer
 ([#212](https://github.com/junyyang-amd/ATOM/issues/212): 81 s, P's sends
-stalled throughout). Such a failure reaches D's scheduler while D is paused
-or mid-update, before its version changes. So D decides a failed receive of
-a stamped handoff at admission, once it schedules again on the weights it
-resumed on (`Scheduler._resolve_waiting_remote_kv`): a stale stamp prefills
-on D as rule 2 does, a current one aborts. An unstamped failed receive
+stalled throughout). D's consumer reports such a failure after holding it
+for `ATOM_PD_FAILED_WRITE_HOLD_S`, so it can reach D's scheduler before or
+after D's version changes. So D decides a failed receive of a stamped
+handoff at admission, once it schedules again on the weights it resumed on
+(`Scheduler._resolve_waiting_remote_kv`): a stale stamp prefills on D as
+rule 2 does, a current one aborts. An unstamped failed receive
 aborts at once, as before.
 
 - Basis: data: [spike #92](https://github.com/junyyang-amd/ATOM/issues/92) (PR #96 at 15dd68e0), 1P1D over `tcp`

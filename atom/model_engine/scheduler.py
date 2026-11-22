@@ -5902,11 +5902,11 @@ class Scheduler:
                 parked is not None
                 and (parked.kv_transfer_params or {}).get("weight_version") is not None
             ):
-                # A handoff that crossed a refit fails while this engine is
-                # paused or mid-update, before its version changes. Admission
-                # decides it, once this engine schedules on the weights it
-                # resumed on: a stale stamp then prefills here, as a received
-                # one does.
+                # A handoff that crossed a refit can fail on either side of
+                # this engine's version change: the failure is reported only
+                # after `ATOM_PD_FAILED_WRITE_HOLD_S`. Admission decides it on
+                # the version this engine then serves: a stale stamp prefills
+                # here, as a received one does.
                 self.failed_recving_kv_req_ids.append(req_id)
                 continue
             self._abort_failed_remote_receive(req_id)
