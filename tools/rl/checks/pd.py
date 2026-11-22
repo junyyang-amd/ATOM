@@ -76,6 +76,9 @@ class Completion(threading.Thread):
                     self.finish = choice.get("finish_reason") or self.finish
             if self.finish is None:
                 raise HarnessError("stream ended without a finish_reason")
+            if not self.tokens:
+                # An aborted request ends as an empty `stop`.
+                raise HarnessError(f"finished {self.finish!r} with no token")
         except Exception as e:  # noqa: BLE001 - any failure is the request's
             self.error = f"{type(e).__name__}: {e}"[:300]
 

@@ -458,12 +458,23 @@ Changes behind it:
 
 Rule 2 departs from the rule `_abort_failed_remote_receive` states: a failed
 P/D receive aborts, because decode is not sized for an unbounded local
-prefill. That rule stays for a failed receive. A stale stamp differs in two
+prefill. That rule stays for a failed receive of an unstamped handoff, or of
+one stamped with the version D serves. A stale stamp differs in two
 ways. It occurs only for handoffs that cross a refit, so its local prefills
 are bounded by the requests in flight at that refit; D already runs that
 many, since a weight change preempts D's running decodes and they recompute
 on D (`Scheduler.preempt_running`, D10). And aborting them fails requests,
 which A9 forbids.
+
+A transfer can fail across a refit: Mooncake times a send out after 30 s,
+and a refit can take longer
+([#212](https://github.com/junyyang-amd/ATOM/issues/212): 81 s, P's sends
+stalled throughout). Such a failure reaches D's scheduler while D is paused
+or mid-update, before its version changes. So D decides a failed receive of
+a stamped handoff at admission, once it schedules again on the weights it
+resumed on (`Scheduler._resolve_waiting_remote_kv`): a stale stamp prefills
+on D as rule 2 does, a current one aborts. An unstamped failed receive
+aborts at once, as before.
 
 - Basis: data: [spike #92](https://github.com/junyyang-amd/ATOM/issues/92) (PR #96 at 15dd68e0), 1P1D over `tcp`
   with requests in flight, in every order: D refused every update (`cannot
