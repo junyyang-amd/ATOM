@@ -204,6 +204,7 @@ def test_producer_advertises_remote_pp_size():
     seq = SimpleNamespace(
         output_tokens=[7],
         spec_token_ids=None,
+        num_prompt_tokens=130,
         block_table=[1, 2, 3],
         id=99,
         state_slot=7,
@@ -217,6 +218,53 @@ def test_producer_advertises_remote_pp_size():
     assert seq.kv_transfer_params_output["dcp_size"] == 1
     assert seq.kv_transfer_params_output["remote_block_ids"] == [1, 2, 3]
     assert seq.kv_transfer_params_output["remote_slot_index"] == 7
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize(
+    "extra_tokens, prompt_blocks",
+    [(0, [1, 2]), (1, [1, 2, 3])],
+    ids=["fills-last-block", "one-token-into-a-block"],
+)
+def test_producer_publishes_only_the_prompt_blocks(
+    dcp_size, extra_tokens, prompt_blocks
+):
+    """With deferred output a finished prefill is scheduled for one more step,
+    and a prompt that fills its last block gets a block for the first token
+    there; MTP lookahead adds blocks too. The consumer allocates the prompt's
+    blocks only."""
+    mc = pytest.importorskip(
+        "atom.kv_transfer.disaggregation.mooncake.mooncake_connector"
+    )
+    sched = object.__new__(mc.MooncakeConnectorScheduler)
+    sched.pp_size = 1
+    sched.tp_size = 1
+    sched.hash_block_size = 16
+    sched.block_size = 16
+    sched.dcp_size = dcp_size
+    sched.dp_rank = 0
+    sched.engine_id = "eng"
+    sched.host_ip = "10.0.0.1"
+    sched.handshake_port = 40000
+    sched.base_handshake_port = 6301
+    sched.is_producer = True
+    sched._awaiting_send = set()
+    sched._reqs_need_save = {}
+
+    seq = SimpleNamespace(
+        kv_transfer_params={"do_remote_decode": True},
+        output_tokens=[7],
+        spec_token_ids=None,
+        num_prompt_tokens=2 * 16 * dcp_size + extra_tokens,
+        block_table=[1, 2, 3, 4],
+        id=99,
+        state_slot=-1,
+        state_slots=[],
+        kv_transfer_params_output=None,
+    )
+    mc.MooncakeConnectorScheduler.request_finished(sched, seq)
+    assert seq.kv_transfer_params_output["remote_block_ids"] == prompt_blocks
+    assert sched._reqs_need_save[seq.id][1] == prompt_blocks
 
 
 @pytest.mark.parametrize(
@@ -1208,6 +1256,57 @@ def test_slot_transfer_refuses_only_a_sharded_producer_of_another_dcp(
 
     assert len(captured) == int(sent)
     assert ("does not support asymmetric DCP" in caplog.text) != sent
+
+
+def test_a_prompt_filling_its_block_hands_off_to_a_one_block_consumer():
+    """A 16-token prompt at block size 16 takes a second block on P for its
+    first token (deferred output's extra step). D allocates one block for the
+    prompt; the send P queues for it must pass the producer's page-count
+    check and reach the write."""
+    from atom.kv_transfer.disaggregation.mooncake import mooncake_connector as mc
+
+    sched = object.__new__(mc.MooncakeConnectorScheduler)
+    sched.pp_size = 1
+    sched.tp_size = 1
+    sched.block_size = 16
+    sched.dcp_size = 1
+    sched.hash_block_size = 16
+    sched.dp_rank = 0
+    sched.engine_id = "eng"
+    sched.host_ip = "10.0.0.1"
+    sched.handshake_port = 40000
+    sched.base_handshake_port = 6301
+    sched.is_producer = True
+    sched._awaiting_send = set()
+    sched._reqs_need_save = {}
+    seq = SimpleNamespace(
+        id="prefill-1",
+        kv_transfer_params={"do_remote_decode": True},
+        output_tokens=[7],
+        spec_token_ids=None,
+        num_prompt_tokens=16,
+        block_table=[3, 4],
+        state_slot=-1,
+        state_slots=[],
+        kv_transfer_params_output=None,
+    )
+    mc.MooncakeConnectorScheduler.request_finished(sched, seq)
+    src_block_ids = sched._reqs_need_save[seq.id][1]
+
+    captured = []
+    conn = _make_transfer_connector({"block_ids": src_block_ids}, captured)
+    conn._execute_block_transfer = lambda _req, _target, src, dst, *_a, **_k: (
+        captured.append((src, dst)) or True
+    )
+    notified = []
+    conn._notify_transfer_result = lambda _req, *, success: notified.append(success)
+
+    conn._execute_transfer(
+        _stateful_write_request(has_slot_regions=False, dst_block_ids=[9])
+    )
+
+    assert captured == [([3], [9])]
+    assert notified == [True]
 
 
 def test_write_done_correct_nonce_accepted():
