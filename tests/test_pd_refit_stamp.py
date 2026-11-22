@@ -16,6 +16,7 @@ from conftest import MockConfig
 from test_kv_change import _engine, _run, _Runners, _running, _wired
 from test_pd_admission import receive_success
 
+from atom.kv_transfer.disaggregation.types import KVConnectorOutput
 from atom.model_engine.engine_utility import (
     PAUSE_GENERATION_CMD,
     RESUME_GENERATION_CMD,
@@ -139,6 +140,45 @@ def test_a_stale_stamp_waits_for_its_transfer_to_finish(build):
     assert seq.status == SequenceStatus.WAITING_FOR_REMOTE_KVS
     assert seq.block_table and sched._num_parked_remote_kv == 1
     assert seq.id not in batch.req_ids
+
+
+def test_a_receive_failing_across_a_refit_prefills_on_d(build, monkeypatch):
+    """P's send times out across D's refit and the failure arrives before
+    D's version changes; D resumes on new weights and prefills the request
+    rather than abort it."""
+    sched, request = build()
+    sched.weight_version = "v1"
+    seq = _parked(sched, request, "v1")
+    released = _count_releases(monkeypatch, sched)
+
+    sched._update_from_kv_xfer_finished(KVConnectorOutput(failed_recving={seq.id}))
+    assert seq.status == SequenceStatus.WAITING_FOR_REMOTE_KVS, "not aborted"
+    sched.weight_version = "v2"  # D's refit commits
+    batch, _ = sched.schedule()
+
+    assert batch.req_ids == [seq.id] and batch.total_seqs_num_prefill == 1
+    assert seq.num_cached_tokens == 0 and list(seq.output_tokens) == []
+    assert not sched.take_rejected() and not sched.failed_recving_kv_req_ids
+    assert sched._num_parked_remote_kv == 0
+    assert released == [seq.id] and not sched.pd_admission.pending
+
+
+def test_a_failed_receive_on_the_current_version_is_aborted(build, monkeypatch):
+    sched, request = build()
+    sched.weight_version = "v1"
+    seq = _parked(sched, request, "v1")
+    free = sched.block_manager.kv.num_free + len(seq.block_table)
+    released = _count_releases(monkeypatch, sched)
+
+    sched._update_from_kv_xfer_finished(KVConnectorOutput(failed_recving={seq.id}))
+    batch, _ = sched.schedule()
+
+    assert seq.id not in batch.req_ids
+    assert sched.take_rejected() == [seq] and seq.leave_reason == "aborted"
+    assert seq not in sched.waiting and not sched.failed_recving_kv_req_ids
+    assert sched._num_parked_remote_kv == 0
+    assert sched.block_manager.kv.num_free == free
+    assert released == [seq.id] and not sched.pd_admission.pending
 
 
 # ── P: the stamp ───────────────────────────────────────────────────────────

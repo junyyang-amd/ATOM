@@ -3198,8 +3198,12 @@ class Scheduler:
         flight and is requeued, never taken down the P/D first-decode path
         (which would skip its suffix prefill).
 
+        A stamped handoff whose receive failed is decided here too, on the
+        weights this engine resumed on (`_update_from_kv_xfer_finished`).
+
         Returns:
-          - ``None`` when the request is still blocked and has been requeued.
+          - ``None`` when the request is still blocked and has been requeued,
+            or has been aborted.
           - ``True`` when the request should jump to first decode.
           - ``False`` when normal prefill admission should continue.
         """
@@ -3209,10 +3213,19 @@ class Scheduler:
             skipped_waiting_requests.append(seq)
             return None
 
+        stamp = (seq.kv_transfer_params or {}).get("weight_version")
+        if stamp is not None and self._pop_req_id(
+            self.failed_recving_kv_req_ids, seq.id
+        ):
+            if stamp == self.weight_version:
+                self._end_failed_remote_receive(seq)
+                return None
+            self._recompute_stale_remote_kv(seq, stamp)
+            return False
+
         if self._consume_failed_remote_kv(seq):
             return False
 
-        stamp = (seq.kv_transfer_params or {}).get("weight_version")
         if (
             stamp is not None
             and stamp != self.weight_version
@@ -3389,7 +3402,19 @@ class Scheduler:
         (``ATOM_PD_FAILED_WRITE_HOLD_S``), so the reservation can now be freed.
         Offload load failures (``failed_loading``) still resume local prefill.
         """
-        seq = next(
+        seq = self._parked_remote_receive(req_id)
+        if seq is None:
+            logger.error(
+                "KV receive failed for request %s, which is not waiting for it; "
+                "nothing to abort",
+                req_id,
+            )
+            return
+        self.waiting.remove(seq)
+        self._end_failed_remote_receive(seq)
+
+    def _parked_remote_receive(self, req_id) -> Sequence | None:
+        return next(
             (
                 s
                 for s in self.waiting
@@ -3398,15 +3423,10 @@ class Scheduler:
             ),
             None,
         )
-        if seq is None:
-            logger.error(
-                "KV receive failed for request %s, which is not waiting for it; "
-                "nothing to abort",
-                req_id,
-            )
-            return
-        logger.error("KV receive failed for request %s; aborting it", req_id)
-        self.waiting.remove(seq)
+
+    def _end_failed_remote_receive(self, seq: Sequence) -> None:
+        """Abort `seq`, out of `waiting`, whose P/D KV receive failed."""
+        logger.error("KV receive failed for request %s; aborting it", seq.id)
         seq.status = SequenceStatus.ABORTED
         self._finish_rejected_waiting(seq)
         # This failure is the terminal report the abort waits for.
@@ -5876,6 +5896,18 @@ class Scheduler:
                 metrics.finish_kv_wait(req_id, succeeded=False)
             assert not is_producer, "Only consumer should update failed KV recv status"
             if self._finish_aborted_load_cleanup(req_id):
+                continue
+            parked = None if is_offload else self._parked_remote_receive(req_id)
+            if (
+                parked is not None
+                and (parked.kv_transfer_params or {}).get("weight_version") is not None
+            ):
+                # A handoff that crossed a refit can fail on either side of
+                # this engine's version change: the failure is reported only
+                # after `ATOM_PD_FAILED_WRITE_HOLD_S`. Admission decides it on
+                # the version this engine then serves: a stale stamp prefills
+                # here, as a received one does.
+                self.failed_recving_kv_req_ids.append(req_id)
                 continue
             self._abort_failed_remote_receive(req_id)
 

@@ -113,6 +113,33 @@ def test_pd_passes_when_every_completion_in_flight_completes_on_v2(
     assert data["stale_recomputes"] == 3
 
 
+def test_pd_fails_a_completion_that_finishes_with_no_token(
+    on_node, monkeypatch, capsys
+):
+    """D aborts a request whose handoff failed; it reaches the client as a
+    finish with no token."""
+    harness, stream, http = fake_pair()
+    aborted = pd.load_prompts()[3]
+
+    def emptied(url, body):
+        for chunk in stream(url, body):
+            if body["prompt"] == aborted:
+                chunk = {"choices": [c | {"text": ""} for c in chunk["choices"]]}
+            yield chunk
+
+    monkeypatch.setattr(pd, "stream", emptied)
+    monkeypatch.setattr(pd, "http", http)
+    monkeypatch.setattr(pd, "token_bytes", lambda checkpoint: ({5: b"x"}, set()))
+    code, out = _run(monkeypatch, capsys, "pd", harness)
+    assert (code, out) == (
+        1,
+        (
+            "FAIL pd: in flight ended {'completed': 63, 'failed': 1}, errors "
+            "[\"HarnessError: finished 'length' with no token\"]"
+        ),
+    )
+
+
 def test_equals_fresh_names_the_checkpoint_as_the_model(fresh, monkeypatch):
     checkpoint, tops, _ = fresh
     tops[()] = [(b"a", -0.1)]
