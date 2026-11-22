@@ -5900,8 +5900,7 @@ class Scheduler:
             parked = None if is_offload else self._parked_remote_receive(req_id)
             if (
                 parked is not None
-                and (parked.kv_transfer_params or {}).get("weight_version")
-                is not None
+                and (parked.kv_transfer_params or {}).get("weight_version") is not None
             ):
                 # A handoff that crossed a refit fails while this engine is
                 # paused or mid-update, before its version changes. Admission
